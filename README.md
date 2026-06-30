@@ -4,7 +4,7 @@ A resumable CSV/XML importer for large WooCommerce catalogs.
 
 Developed by Julian Tracht of Tracht Digital Solutions.
 
-Repository: https://github.com/Tracht-Digital-Solutions/WP-Plugin-TDS-Product-Import
+Repository: https://github.com/Tracht-Digital-Solutions/wp-plugin-tds-product-mport
 
 ## Development
 

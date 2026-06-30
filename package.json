@@ -1,6 +1,6 @@
 {
   "name": "tds-product-importer",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "author": "Julian Tracht von Tracht Digital Solutions",
   "description": "Admin application and release tooling for TDS Product Importer.",
