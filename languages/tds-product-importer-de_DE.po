@@ -1,0 +1,14 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: TDS Product Importer 1.0.0\n"
+"Language: de_DE\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+
+msgid "TDS Import"
+msgstr "TDS Import"
+
+msgid "Presets"
+msgstr "Presets"
+
+msgid "Jobs"
+msgstr "Aufträge"

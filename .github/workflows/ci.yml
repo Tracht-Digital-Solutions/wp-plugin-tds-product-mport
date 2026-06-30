@@ -1,0 +1,50 @@
+name: CI
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        php: ['8.1', '8.2', '8.3']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          tools: composer:v2
+          coverage: none
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: composer install --no-interaction --prefer-dist
+      - run: composer test
+      - run: composer lint
+      - run: composer analyse
+      - run: npm run lint:js
+      - run: npm run test:js
+
+  plugin-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.1'
+          tools: composer:v2
+          coverage: none
+      - run: composer install --no-dev --classmap-authoritative --no-interaction
+      - name: Create production tree
+        run: |
+          mkdir -p build/tds-product-importer
+          cp -r tds-product-importer.php src assets languages vendor readme.txt LICENSE build/tds-product-importer/
+          find build/tds-product-importer/vendor -type f ! -name '*.php' ! -name '*.cnf' ! -name 'LICENSE*' -delete
+          rm -rf build/tds-product-importer/vendor/bin
+      - uses: wordpress/plugin-check-action@v1
+        with:
+          build-dir: './build/tds-product-importer'
+          exclude-directories: 'vendor'
+          ignore-warnings: true
+          include-experimental: false

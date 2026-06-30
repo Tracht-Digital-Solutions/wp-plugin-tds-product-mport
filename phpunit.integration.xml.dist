@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit bootstrap="tests/integration-bootstrap.php" colors="true" cacheResultFile=".phpunit.cache/integration-results">
+  <testsuites>
+    <testsuite name="woocommerce-integration">
+      <directory>tests/Integration</directory>
+    </testsuite>
+  </testsuites>
+</phpunit>

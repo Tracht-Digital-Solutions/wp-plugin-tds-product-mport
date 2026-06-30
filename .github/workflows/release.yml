@@ -1,0 +1,44 @@
+name: Release
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.1'
+          tools: composer:v2
+          coverage: none
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: composer install --no-dev --classmap-authoritative --no-interaction
+      - run: npm run build
+      - name: Verify version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          grep -Eq "Version:[[:space:]]*${VERSION}" tds-product-importer.php
+          grep -q "Stable tag: ${VERSION}" readme.txt
+      - name: Build portable ZIP
+        run: |
+          mkdir -p dist/tds-product-importer
+          cp -r tds-product-importer.php src assets languages vendor readme.txt LICENSE dist/tds-product-importer/
+          find dist/tds-product-importer/vendor -type f ! -name '*.php' ! -name '*.cnf' ! -name 'LICENSE*' -delete
+          rm -rf dist/tds-product-importer/vendor/bin
+          cd dist
+          zip -qr tds-product-importer.zip tds-product-importer
+          sha256sum tds-product-importer.zip > tds-product-importer.zip.sha256
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/tds-product-importer.zip
+            dist/tds-product-importer.zip.sha256

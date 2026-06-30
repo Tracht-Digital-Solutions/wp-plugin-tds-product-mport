@@ -1,0 +1,48 @@
+{
+  "name": "tds/tds-product-importer",
+  "description": "High-volume CSV and XML product importer for WooCommerce.",
+  "type": "wordpress-plugin",
+  "license": "GPL-2.0-or-later",
+  "authors": [
+    {
+      "name": "Julian Tracht von Tracht Digital Solutions",
+      "role": "Developer"
+    }
+  ],
+  "require": {
+    "php": ">=8.1",
+    "phpseclib/phpseclib": "^3.0"
+  },
+  "require-dev": {
+    "brain/monkey": "^2.6",
+    "php-stubs/woocommerce-stubs": "^10.0",
+    "php-stubs/wordpress-stubs": "^6.5",
+    "phpunit/phpunit": "^9.6",
+    "szepeviktor/phpstan-wordpress": "^2.0",
+    "woocommerce/woocommerce-sniffs": "^1.0",
+    "wp-coding-standards/wpcs": "^3.1",
+    "yoast/phpunit-polyfills": "^2.0.5"
+  },
+  "autoload": {
+    "psr-4": {
+      "TDS\\ProductImporter\\": "src/"
+    }
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "TDS\\ProductImporter\\Tests\\": "tests/"
+    }
+  },
+  "scripts": {
+    "test": "phpunit",
+    "test:integration": "phpunit -c phpunit.integration.xml.dist",
+    "lint": "phpcs",
+    "analyse": "phpstan analyse --memory-limit=1G"
+  },
+  "config": {
+    "allow-plugins": {
+      "dealerdirect/phpcodesniffer-composer-installer": true
+    },
+    "sort-packages": true
+  }
+}

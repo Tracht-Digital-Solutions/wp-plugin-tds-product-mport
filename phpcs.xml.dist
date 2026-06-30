@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<ruleset name="TDS Product Importer">
+  <description>WordPress coding standards for TDS Product Importer.</description>
+  <file>tds-product-importer.php</file>
+  <file>src</file>
+  <exclude-pattern>vendor/*</exclude-pattern>
+  <arg name="extensions" value="php"/>
+  <arg value="sp"/>
+  <rule ref="WordPress">
+    <exclude name="Squiz.Commenting"/>
+    <exclude name="Generic.Commenting.DocComment.MissingShort"/>
+    <exclude name="WordPress.DB.DirectDatabaseQuery.DirectQuery"/>
+    <exclude name="WordPress.DB.DirectDatabaseQuery.NoCaching"/>
+    <exclude name="Universal.Operators.DisallowShortTernary.Found"/>
+    <exclude name="WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_encode"/>
+    <exclude name="WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_decode"/>
+    <exclude name="WordPress.WP.Capabilities.Unknown"/>
+    <exclude name="WordPress.DB.SlowDBQuery.slow_db_query_meta_key"/>
+    <exclude name="WordPress.DB.SlowDBQuery.slow_db_query_meta_value"/>
+    <exclude name="WordPress.Security.EscapeOutput.ExceptionNotEscaped"/>
+    <exclude name="WordPress.NamingConventions.ValidVariableName.UsedPropertyNotSnakeCase"/>
+  </rule>
+  <config name="minimum_supported_wp_version" value="6.5"/>
+  <config name="testVersion" value="8.1-"/>
+  <rule ref="WordPress.Files.FileName">
+    <exclude-pattern>src/*</exclude-pattern>
+  </rule>
+</ruleset>

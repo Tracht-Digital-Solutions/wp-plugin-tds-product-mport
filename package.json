@@ -1,0 +1,16 @@
+{
+  "name": "tds-product-importer",
+  "version": "1.0.0",
+  "private": true,
+  "author": "Julian Tracht von Tracht Digital Solutions",
+  "description": "Admin application and release tooling for TDS Product Importer.",
+  "scripts": {
+    "build": "node tools/build-assets.mjs",
+    "lint:js": "node --check assets/admin.js && node --check tools/build-assets.mjs",
+    "test:js": "node --test tests/js/*.test.mjs",
+    "package": "node tools/package.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
