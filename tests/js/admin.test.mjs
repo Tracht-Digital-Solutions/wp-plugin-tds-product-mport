@@ -23,6 +23,7 @@ test('wizard uses explicit suggestion review and accessible live progress', () =
 	assert.match(source, /reviewSuggestions/);
 	assert.match(source, /Vorschläge übernehmen/);
 	assert.match(source, /Ohne Vorschläge fortfahren/);
+	assert.match(source, /'aria-label': t\('Importfortschritt', 'Import progress'\)/);
 	assert.match(source, /aria-valuetext/);
 	assert.match(source, /recent_warnings/);
 	assert.match(source, /jobMetrics/);

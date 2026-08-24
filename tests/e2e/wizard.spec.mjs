@@ -30,7 +30,7 @@ async function openImporter(page) {
 }
 
 async function createCsvDraft(page, suffix) {
-	await page.getByRole('button', { name: /New import/i }).click();
+	await page.getByRole('button', { name: 'New import', exact: true }).click();
 	await expect(page.getByRole('heading', { name: 'Source', exact: true })).toBeFocused();
 	await page.getByLabel(/Import name/i).fill(`Browser import ${suffix}`);
 	await page.locator('#tds-source-upload').setInputFiles({
@@ -135,7 +135,7 @@ test('CSV wizard resumes after reload, confirms suggestions, and reaches live pr
 
 test('stale draft revisions surface a recoverable autosave conflict', async ({ page }) => {
 	await openImporter(page);
-	await page.getByRole('button', { name: /New import/i }).click();
+	await page.getByRole('button', { name: 'New import', exact: true }).click();
 	await expect(page).toHaveURL(/[?&]draft=\d+/);
 	await page.evaluate(async () => {
 		const id = Number(new URL(window.location.href).searchParams.get('draft'));

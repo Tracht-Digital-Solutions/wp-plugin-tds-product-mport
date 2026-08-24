@@ -1045,7 +1045,7 @@
 					h('strong', null, `${percent}%`)
 				),
 				h('div', {
-					className: 'tds-progress-bar', role: 'progressbar', 'aria-valuenow': percent,
+					className: 'tds-progress-bar', role: 'progressbar', 'aria-label': t('Importfortschritt', 'Import progress'), 'aria-valuenow': percent,
 					'aria-valuemin': 0, 'aria-valuemax': 100,
 					'aria-valuetext': t(`${percent} Prozent, ${job.processed || 0} von ${job.total || 0}, Phase ${phaseName}`, `${percent} percent, ${job.processed || 0} of ${job.total || 0}, phase ${phaseName}`),
 				}, h('span', { style: { width: `${percent}%` } })),
