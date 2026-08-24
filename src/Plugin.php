@@ -42,12 +42,6 @@ final class Plugin {
 	 * Register hooks after all plugins are available.
 	 */
 	public function boot(): void {
-		load_plugin_textdomain(
-			'tds-product-importer',
-			false,
-			dirname( plugin_basename( TDS_IMPORTER_FILE ) ) . '/languages'
-		);
-
 		if ( ! $this->requirements_met() ) {
 			add_action( 'admin_notices', array( $this, 'dependency_notice' ) );
 			return;

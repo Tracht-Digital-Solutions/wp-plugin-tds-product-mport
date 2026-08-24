@@ -6,7 +6,7 @@ const importerUrl = '/wp-admin/admin.php?page=tds-product-importer';
 async function login(page) {
 	await page.goto('/wp-login.php');
 	await page.getByLabel(/Username|Email Address/i).fill('admin');
-	await page.getByLabel(/Password/i).fill('password');
+	await page.locator('#user_pass').fill('password');
 	await page.getByRole('button', { name: /Log In/i }).click();
 	await page.waitForURL(/wp-admin/);
 }

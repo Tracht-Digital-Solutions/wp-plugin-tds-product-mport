@@ -5,7 +5,7 @@
  * Description:       Resumable high-volume CSV and XML product imports for WooCommerce.
  * Version:           2.0.0
  * Requires at least: 6.5
- * Tested up to:      7.0.4
+ * Tested up to:      7.1
  * Requires PHP:      8.1
  * Requires Plugins:  woocommerce
  * WC requires at least: 8.2

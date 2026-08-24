@@ -2,7 +2,7 @@
 Contributors: tds
 Tags: woocommerce, product import, csv, xml, inventory
 Requires at least: 6.5
-Tested up to: 7.0.4
+Tested up to: 7.1
 Requires PHP: 8.1
 WC requires at least: 8.2
 WC tested up to: 11.0.1
@@ -63,7 +63,7 @@ No. Expressions use a small, validated language with a fixed function allowlist.
 * Added the TDS-branded step-by-step import wizard with resumable drafts, source detection, mapping suggestions, preflight review, and live job progress.
 * Added resumable staging, bounded previews, per-batch lookup caches, normalized media reuse, job rate/ETA metrics, and stronger global job locking.
 * Improved mapping confirmation, autosave safety, keyboard navigation, focus handling, mobile layouts, and warning visibility.
-* Updated compatibility and development tooling for WordPress 7.0.4 and WooCommerce 11.0.1.
+* Updated compatibility and development tooling for WordPress 7.1 and WooCommerce 11.0.1.
 * Unified local, CI, and GitHub Release packaging for reproducible ZIP and SHA-256 artifacts.
 
 = 1.0.1 =

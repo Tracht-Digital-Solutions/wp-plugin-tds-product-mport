@@ -11,7 +11,7 @@ Developed by Julian Tracht of Tracht Digital Solutions.
 
 Repository: https://github.com/Tracht-Digital-Solutions/wp-plugin-tds-product-mport
 
-Current release: **2.0.0**. Tested with WordPress 7.0.4 and WooCommerce
+Current release: **2.0.0**. Tested with WordPress 7.1 and WooCommerce
 11.0.1. Minimum requirements remain PHP 8.1, WordPress 6.5, and
 WooCommerce 8.2.
 
