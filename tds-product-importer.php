@@ -3,10 +3,13 @@
  * Plugin Name:       TDS Product Importer for WooCommerce
  * Plugin URI:        https://github.com/Tracht-Digital-Solutions/wp-plugin-tds-product-mport
  * Description:       Resumable high-volume CSV and XML product imports for WooCommerce.
- * Version:           1.0.1
+ * Version:           2.0.0
  * Requires at least: 6.5
+ * Tested up to:      7.0.4
  * Requires PHP:      8.1
+ * Requires Plugins:  woocommerce
  * WC requires at least: 8.2
+ * WC tested up to:   11.0.1
  * Author:            Julian Tracht von Tracht Digital Solutions
  * Author URI:        https://github.com/Tracht-Digital-Solutions
  * License:           GPL-2.0-or-later
@@ -19,7 +22,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'TDS_IMPORTER_VERSION', '1.0.1' );
+define( 'TDS_IMPORTER_VERSION', '2.0.0' );
 define( 'TDS_IMPORTER_FILE', __FILE__ );
 define( 'TDS_IMPORTER_DIR', plugin_dir_path( __FILE__ ) );
 define( 'TDS_IMPORTER_URL', plugin_dir_url( __FILE__ ) );

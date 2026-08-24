@@ -12,7 +12,8 @@ namespace TDS\ProductImporter\Infrastructure;
  */
 final class Cleanup {
 	public function __construct(
-		private Database $database
+		private Database $database,
+		private PresetRepository $presets
 	) {}
 
 	public function register(): void {
@@ -34,6 +35,12 @@ final class Cleanup {
 	 */
 	public function run(): void {
 		global $wpdb;
+		foreach ( $this->presets->expired_drafts() as $draft ) {
+			$source_path = (string) ( $draft['config']['source']['upload_path'] ?? '' );
+			$this->presets->delete( (int) $draft['id'] );
+			$this->presets->delete_source_if_unreferenced( $source_path );
+		}
+
 		$jobs = $wpdb->get_results(
 			$wpdb->prepare(
 				"SELECT id,source_path FROM {$this->database->table( 'jobs' )} WHERE rollback_until IS NOT NULL AND rollback_until<%s LIMIT 100", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
@@ -45,8 +52,10 @@ final class Cleanup {
 			$id = (int) $job['id'];
 			$wpdb->delete( $this->database->table( 'items' ), array( 'job_id' => $id ) );
 			$wpdb->delete( $this->database->table( 'snapshots' ), array( 'job_id' => $id ) );
-			if ( ! empty( $job['source_path'] ) && str_starts_with( wp_normalize_path( $job['source_path'] ), wp_normalize_path( Installer::storage_dir() ) . '/' ) ) {
-				wp_delete_file( $job['source_path'] );
+			$wpdb->delete( $this->database->table( 'logs' ), array( 'job_id' => $id ) );
+			$source_path = Installer::resolve_storage_file( (string) ( $job['source_path'] ?? '' ) );
+			if ( null !== $source_path ) {
+				wp_delete_file( $source_path );
 			}
 			$wpdb->update(
 				$this->database->table( 'jobs' ),

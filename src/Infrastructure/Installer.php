@@ -31,10 +31,17 @@ final class Installer {
 				name varchar(190) NOT NULL,
 				config longtext NOT NULL,
 				enabled tinyint(1) NOT NULL DEFAULT 1,
+				status varchar(20) NOT NULL DEFAULT 'active',
+				wizard_step tinyint(3) unsigned NOT NULL DEFAULT 0,
+				parent_preset_id bigint(20) unsigned NULL,
+				expires_at datetime NULL,
+				revision bigint(20) unsigned NOT NULL DEFAULT 1,
 				created_at datetime NOT NULL,
 				updated_at datetime NOT NULL,
 				PRIMARY KEY (id),
-				KEY enabled (enabled)
+				KEY enabled (enabled),
+				KEY status_expiry (status,expires_at),
+				KEY parent_preset (parent_preset_id)
 			) $charset;",
 			"CREATE TABLE {$db->table( 'jobs' )} (
 				id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
@@ -43,6 +50,8 @@ final class Installer {
 				phase varchar(30) NOT NULL,
 				source_path text NULL,
 				source_hash char(64) NULL,
+				parse_cursor bigint(20) unsigned NOT NULL DEFAULT 0,
+				staged_total bigint(20) unsigned NOT NULL DEFAULT 0,
 				total bigint(20) unsigned NOT NULL DEFAULT 0,
 				processed bigint(20) unsigned NOT NULL DEFAULT 0,
 				created bigint(20) unsigned NOT NULL DEFAULT 0,
@@ -54,6 +63,7 @@ final class Installer {
 				started_at datetime NULL,
 				completed_at datetime NULL,
 				rollback_until datetime NULL,
+				lease_until datetime NULL,
 				created_at datetime NOT NULL,
 				updated_at datetime NOT NULL,
 				PRIMARY KEY (id),
@@ -66,6 +76,7 @@ final class Installer {
 				sequence_no bigint(20) unsigned NOT NULL,
 				record_type varchar(30) NOT NULL DEFAULT 'simple',
 				source_key varchar(190) NULL,
+				source_key_hash char(64) NULL,
 				parent_key varchar(190) NULL,
 				payload longtext NOT NULL,
 				status varchar(30) NOT NULL DEFAULT 'pending',
@@ -76,6 +87,7 @@ final class Installer {
 				updated_at datetime NOT NULL,
 				PRIMARY KEY (id),
 				UNIQUE KEY job_sequence (job_id,sequence_no),
+				UNIQUE KEY job_source_hash (job_id,source_key_hash),
 				KEY job_status (job_id,status,id),
 				KEY job_source (job_id,source_key)
 			) $charset;",
@@ -117,12 +129,81 @@ final class Installer {
 		);
 
 		foreach ( $sql as $statement ) {
-			dbDelta( $statement );
+			$wpdb->last_error = '';
+			dbDelta( str_replace( ") $charset;", ") ENGINE=InnoDB $charset;", $statement ) );
+			$error = self::database_error();
+			if ( '' !== $error ) {
+				throw new \RuntimeException( 'Unable to update the importer schema: ' . $error );
+			}
 		}
+		self::ensure_transactional_tables( $db );
+		self::run_query(
+			"UPDATE {$db->table( 'presets' )} SET status='active' WHERE status IS NULL OR status=''" // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared,WordPress.DB.PreparedSQL.NotPrepared
+		);
+		$items_table = $db->table( 'items' );
+		$jobs_table  = $db->table( 'jobs' );
+		self::run_query(
+			"UPDATE $items_table i INNER JOIN (SELECT MIN(id) AS first_id FROM $items_table WHERE source_key_hash IS NULL GROUP BY job_id,LOWER(TRIM(COALESCE(source_key,'')))) first_rows ON first_rows.first_id=i.id SET i.source_key_hash=SHA2(LOWER(TRIM(COALESCE(i.source_key,''))),256)" // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared,WordPress.DB.PreparedSQL.NotPrepared
+		);
+		self::run_query(
+			"UPDATE $items_table SET source_key_hash=SHA2(CONCAT('legacy-duplicate:',SHA2(LOWER(TRIM(COALESCE(source_key,''))),256),':',id),256),status='failed',error_code='duplicate_identifier',error_message='Duplicate source identifier found during schema migration.' WHERE source_key_hash IS NULL" // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared,WordPress.DB.PreparedSQL.NotPrepared
+		);
+		$now    = current_time( 'mysql', true );
+		$expiry = gmdate( 'Y-m-d H:i:s', time() + 30 * DAY_IN_SECONDS );
+		self::run_query(
+			$wpdb->prepare(
+				"UPDATE $jobs_table j INNER JOIN (SELECT DISTINCT job_id FROM $items_table WHERE error_code='duplicate_identifier') duplicate_jobs ON duplicate_jobs.job_id=j.id SET j.completed_at=IF(j.status IN ('queued','running','paused','rollback'),%s,j.completed_at),j.rollback_until=IF(j.status IN ('queued','running','paused','rollback'),COALESCE(j.rollback_until,%s),j.rollback_until),j.message=IF(j.status IN ('queued','running','paused','rollback'),'Duplicate source identifiers were found during the 2.0 schema migration.',j.message),j.status=IF(j.status IN ('queued','running','paused','rollback'),'failed',j.status)", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				$now,
+				$expiry
+			)
+		);
+		self::run_query(
+			"UPDATE {$db->table( 'jobs' )} j SET staged_total=(SELECT COUNT(*) FROM {$db->table( 'items' )} i WHERE i.job_id=j.id) WHERE staged_total=0" // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared,WordPress.DB.PreparedSQL.NotPrepared
+		);
 
 		update_option( 'tds_importer_db_version', TDS_IMPORTER_VERSION, false );
 		wp_mkdir_p( self::storage_dir() );
 		self::protect_storage();
+	}
+
+	/**
+	 * Transactions are required for atomic staging and aggregate counters.
+	 */
+	private static function ensure_transactional_tables( Database $database ): void {
+		global $wpdb;
+		foreach ( array( 'presets', 'jobs', 'items', 'links', 'snapshots', 'logs' ) as $suffix ) {
+			$table  = $database->table( $suffix );
+			$engine = $wpdb->get_var(
+				$wpdb->prepare(
+					'SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s',
+					$table
+				)
+			);
+			if ( '' !== $wpdb->last_error ) {
+				throw new \RuntimeException( "Unable to inspect the $table storage engine: {$wpdb->last_error}" );
+			}
+			if ( ! is_string( $engine ) || '' === $engine ) {
+				throw new \RuntimeException( "Unable to inspect the $table storage engine." );
+			}
+			if ( 0 !== strcasecmp( $engine, 'InnoDB' ) ) {
+				$result = $wpdb->query( "ALTER TABLE `$table` ENGINE=InnoDB" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared,WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.DirectDatabaseQuery.SchemaChange
+				if ( false === $result ) {
+					throw new \RuntimeException( "The $table table must use InnoDB." );
+				}
+			}
+		}
+	}
+
+	private static function run_query( string $query ): void {
+		global $wpdb;
+		if ( false === $wpdb->query( $query ) ) { // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+			throw new \RuntimeException( 'Unable to migrate importer data: ' . $wpdb->last_error );
+		}
+	}
+
+	private static function database_error(): string {
+		global $wpdb;
+		return (string) $wpdb->last_error;
 	}
 
 	/**
@@ -140,6 +221,23 @@ final class Installer {
 	public static function storage_dir(): string {
 		$uploads = wp_upload_dir();
 		return trailingslashit( $uploads['basedir'] ) . 'tds-product-importer';
+	}
+
+	/**
+	 * Resolve an existing regular file and prove that it remains inside storage.
+	 */
+	public static function resolve_storage_file( string $path ): ?string {
+		if ( '' === $path ) {
+			return null;
+		}
+		$root = realpath( self::storage_dir() );
+		$file = realpath( $path );
+		if ( false === $root || false === $file || ! is_file( $file ) ) {
+			return null;
+		}
+		$root = trailingslashit( wp_normalize_path( $root ) );
+		$file = wp_normalize_path( $file );
+		return str_starts_with( $file, $root ) ? $file : null;
 	}
 
 	/**

@@ -13,6 +13,11 @@ use TDS\ProductImporter\Domain\Expression\Evaluator;
  * Applies preset mapping rules to normalized source records.
  */
 final class Mapper {
+	private const EXPRESSION_CACHE_LIMIT = 128;
+
+	/** @var array<string,array<string,mixed>> */
+	private array $expression_cache = array();
+
 	public function __construct( private Evaluator $evaluator ) {}
 
 	/**
@@ -61,7 +66,7 @@ final class Mapper {
 			$targets[ $target ] = true;
 			try {
 				if ( ! empty( $mapping['expression'] ) ) {
-					$this->evaluator->parse( (string) $mapping['expression'] );
+					$this->expression_ast( (string) $mapping['expression'] );
 				}
 			} catch ( \Throwable $error ) {
 				$errors[] = 'Mapping ' . ( $index + 1 ) . ': ' . $error->getMessage();
@@ -90,9 +95,31 @@ final class Mapper {
 			return $this->evaluator->evaluate_ast( $mapping['ast'], $record );
 		}
 		if ( '' !== (string) ( $mapping['expression'] ?? '' ) ) {
-			return $this->evaluator->evaluate( (string) $mapping['expression'], $record );
+			return $this->evaluator->evaluate_ast( $this->expression_ast( (string) $mapping['expression'] ), $record );
 		}
 		$source = (string) ( $mapping['source'] ?? '' );
 		return '' === $source ? null : ( $record[ $source ] ?? null );
+	}
+
+	/**
+	 * Parse an expression once per worker request and keep the cache bounded.
+	 *
+	 * @return array<string,mixed>
+	 */
+	private function expression_ast( string $expression ): array {
+		if ( array_key_exists( $expression, $this->expression_cache ) ) {
+			return $this->expression_cache[ $expression ];
+		}
+
+		$ast = $this->evaluator->parse( $expression );
+		if ( self::EXPRESSION_CACHE_LIMIT <= count( $this->expression_cache ) ) {
+			$oldest = array_key_first( $this->expression_cache );
+			if ( null !== $oldest ) {
+				unset( $this->expression_cache[ $oldest ] );
+			}
+		}
+		$this->expression_cache[ $expression ] = $ast;
+
+		return $ast;
 	}
 }

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://schemas.wp.org/trunk/wp-env.json",
+  "core": "https://wordpress.org/wordpress-6.5.zip",
+  "phpVersion": "8.1",
+  "testsEnvironment": false,
+  "plugins": [
+    ".",
+    "https://downloads.wordpress.org/plugin/woocommerce.8.2.0.zip"
+  ],
+  "config": {
+    "WP_DEBUG": true,
+    "WP_DEBUG_LOG": true,
+    "SCRIPT_DEBUG": true
+  }
+}

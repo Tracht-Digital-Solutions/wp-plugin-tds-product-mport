@@ -5,7 +5,7 @@
 /.phpunit.cache/
 /.phpunit.result.cache
 /.tooling/
-/.wp-env.json
+/.wp-env.override.json
+/tests/env/*.override.json
 *.zip
 *.sha256
-

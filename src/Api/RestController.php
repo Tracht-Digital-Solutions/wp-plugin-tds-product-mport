@@ -9,9 +9,11 @@ namespace TDS\ProductImporter\Api;
 
 use InvalidArgumentException;
 use TDS\ProductImporter\Domain\Expression\Evaluator;
+use TDS\ProductImporter\Domain\Import\MappingSuggester;
 use TDS\ProductImporter\Domain\Import\Mapper;
 use TDS\ProductImporter\Domain\Import\RollbackService;
 use TDS\ProductImporter\Domain\Parsing\ParserFactory;
+use TDS\ProductImporter\Infrastructure\ConflictException;
 use TDS\ProductImporter\Infrastructure\JobRepository;
 use TDS\ProductImporter\Infrastructure\PresetRepository;
 use TDS\ProductImporter\Infrastructure\Scheduler;
@@ -25,7 +27,12 @@ use WP_REST_Server;
  * Provides the authenticated admin API.
  */
 final class RestController {
-	private const NS = 'tds-import/v1';
+	private const NS                  = 'tds-import/v1';
+	private const PREVIEW_RECORDS     = 8;
+	private const PREVIEW_FIELDS      = 200;
+	private const PREVIEW_VALUE_CHARS = 512;
+	private const PREVIEW_DEPTH       = 4;
+	private const PREVIEW_ARRAY_ITEMS = 50;
 
 	public function __construct(
 		private PresetRepository $presets,
@@ -33,6 +40,7 @@ final class RestController {
 		private SourceManager $sources,
 		private ParserFactory $parsers,
 		private Mapper $mapper,
+		private MappingSuggester $suggester,
 		private RollbackService $rollback,
 		private Scheduler $scheduler
 	) {}
@@ -42,6 +50,65 @@ final class RestController {
 	}
 
 	public function routes(): void {
+		register_rest_route(
+			self::NS,
+			'/wizard/drafts',
+			array(
+				array(
+					'methods'             => WP_REST_Server::READABLE,
+					'callback'            => fn() => $this->presets->drafts(),
+					'permission_callback' => array( $this, 'permission' ),
+				),
+				array(
+					'methods'             => WP_REST_Server::CREATABLE,
+					'callback'            => array( $this, 'create_draft' ),
+					'permission_callback' => array( $this, 'permission' ),
+				),
+			)
+		);
+		register_rest_route(
+			self::NS,
+			'/wizard/drafts/(?P<id>\d+)',
+			array(
+				array(
+					'methods'             => WP_REST_Server::EDITABLE,
+					'callback'            => array( $this, 'update_draft' ),
+					'permission_callback' => array( $this, 'permission' ),
+				),
+				array(
+					'methods'             => WP_REST_Server::DELETABLE,
+					'callback'            => array( $this, 'delete_draft' ),
+					'permission_callback' => array( $this, 'permission' ),
+				),
+			)
+		);
+		register_rest_route(
+			self::NS,
+			'/wizard/drafts/(?P<id>\d+)/source-preview',
+			array(
+				'methods'             => WP_REST_Server::CREATABLE,
+				'callback'            => array( $this, 'source_preview' ),
+				'permission_callback' => array( $this, 'permission' ),
+			)
+		);
+		register_rest_route(
+			self::NS,
+			'/wizard/drafts/(?P<id>\d+)/mapping-suggestions',
+			array(
+				'methods'             => WP_REST_Server::CREATABLE,
+				'callback'            => array( $this, 'mapping_suggestions' ),
+				'permission_callback' => array( $this, 'permission' ),
+			)
+		);
+		register_rest_route(
+			self::NS,
+			'/wizard/drafts/(?P<id>\d+)/start',
+			array(
+				'methods'             => WP_REST_Server::CREATABLE,
+				'callback'            => array( $this, 'start_draft' ),
+				'permission_callback' => array( $this, 'permission' ),
+			)
+		);
 		register_rest_route(
 			self::NS,
 			'/presets',
@@ -128,6 +195,15 @@ final class RestController {
 		);
 		register_rest_route(
 			self::NS,
+			'/jobs/(?P<id>\d+)',
+			array(
+				'methods'             => WP_REST_Server::READABLE,
+				'callback'            => array( $this, 'job_detail' ),
+				'permission_callback' => array( $this, 'permission' ),
+			)
+		);
+		register_rest_route(
+			self::NS,
 			'/jobs/(?P<id>\d+)/control',
 			array(
 				'methods'             => WP_REST_Server::CREATABLE,
@@ -168,9 +244,204 @@ final class RestController {
 		return current_user_can( 'manage_woocommerce' );
 	}
 
+	/**
+	 * Create a wizard draft, optionally from an active preset.
+	 */
+	public function create_draft( WP_REST_Request $request ): WP_REST_Response|WP_Error {
+		try {
+			$parent_id = (int) $request->get_param( 'parent_preset_id' );
+			$draft     = $this->presets->create_draft( $parent_id > 0 ? $parent_id : null );
+			return new WP_REST_Response( $draft, 201 );
+		} catch ( \Throwable $error ) {
+			return $this->error( $error );
+		}
+	}
+
+	/**
+	 * Autosave a wizard draft with optimistic locking.
+	 */
+	public function update_draft( WP_REST_Request $request ): WP_REST_Response|WP_Error {
+		try {
+			return new WP_REST_Response(
+				$this->presets->update_draft( (int) $request['id'], (array) $request->get_json_params() )
+			);
+		} catch ( \Throwable $error ) {
+			return $this->error( $error );
+		}
+	}
+
+	/**
+	 * Delete an abandoned wizard draft and its unreferenced upload.
+	 */
+	public function delete_draft( WP_REST_Request $request ): WP_REST_Response|WP_Error {
+		try {
+			$draft = $this->presets->find( (int) $request['id'] );
+			if ( ! $draft || 'draft' !== $draft['status'] ) {
+				throw new InvalidArgumentException( 'Wizard draft not found.' );
+			}
+			$path = (string) ( $draft['config']['source']['upload_path'] ?? '' );
+			$this->presets->delete( (int) $draft['id'] );
+			$this->presets->delete_source_if_unreferenced( $path );
+			return new WP_REST_Response( null, 204 );
+		} catch ( \Throwable $error ) {
+			return $this->error( $error );
+		}
+	}
+
+	/**
+	 * Materialize a draft source and return its detected structure.
+	 */
+	public function source_preview( WP_REST_Request $request ): WP_REST_Response|WP_Error {
+		$path = null;
+		try {
+			$draft = $this->presets->find( (int) $request['id'] );
+			if ( ! $draft || 'draft' !== $draft['status'] ) {
+				throw new InvalidArgumentException( 'Wizard draft not found.' );
+			}
+			$config    = (array) $draft['config'];
+			$preview   = $this->sources->preview( $config );
+			$path      = $preview['path'];
+			$format    = $this->parsers->detect_format( $path, $config );
+			$structure = $this->parsers->detect_structure( $path, $config );
+			$samples   = $this->parsers->preview( $path, $config, self::PREVIEW_RECORDS + 1 );
+			$truncated = (bool) $preview['truncated'] || count( $samples ) > self::PREVIEW_RECORDS;
+			$records   = $this->bound_preview_records( array_slice( $samples, 0, self::PREVIEW_RECORDS ), $truncated );
+			$fields    = array();
+			foreach ( $records as $record ) {
+				foreach ( array_keys( $record ) as $field ) {
+					if ( ! in_array( $field, $fields, true ) ) {
+						$fields[] = $field;
+					}
+				}
+			}
+			return new WP_REST_Response(
+				array(
+					'format'     => $format,
+					'structure'  => $structure,
+					'fields'     => $fields,
+					'records'    => $records,
+					'size'       => $preview['size'],
+					'hash'       => $preview['hash'],
+					'truncated'  => $truncated,
+					'hash_scope' => $preview['hash_scope'],
+					'limits'     => array(
+						'records'       => self::PREVIEW_RECORDS,
+						'fields'        => self::PREVIEW_FIELDS,
+						'value_chars'   => self::PREVIEW_VALUE_CHARS,
+						'source_bytes'  => SourceManager::MAX_PREVIEW_BYTES,
+						'nesting_depth' => self::PREVIEW_DEPTH,
+						'array_items'   => self::PREVIEW_ARRAY_ITEMS,
+					),
+				)
+			);
+		} catch ( \Throwable $error ) {
+			return $this->error( $error );
+		} finally {
+			if ( $path && is_file( $path ) ) {
+				wp_delete_file( $path );
+			}
+		}
+	}
+
+	/**
+	 * Suggest visible mappings for detected source fields.
+	 */
+	public function mapping_suggestions( WP_REST_Request $request ): WP_REST_Response|WP_Error {
+		try {
+			$draft = $this->presets->find( (int) $request['id'] );
+			if ( ! $draft || 'draft' !== $draft['status'] ) {
+				throw new InvalidArgumentException( 'Wizard draft not found.' );
+			}
+			$params = (array) $request->get_json_params();
+			$input  = is_array( $params['fields'] ?? null ) ? array_filter( $params['fields'], 'is_scalar' ) : array();
+			$fields = array_slice(
+				array_values(
+					array_unique(
+						array_filter(
+							array_map( static fn( mixed $field ): string => sanitize_text_field( (string) $field ), $input )
+						)
+					)
+				),
+				0,
+				self::PREVIEW_FIELDS
+			);
+			return new WP_REST_Response(
+				$this->suggester->suggest( $fields, (array) ( $draft['config']['mappings'] ?? array() ) )
+			);
+		} catch ( \Throwable $error ) {
+			return $this->error( $error );
+		}
+	}
+
+	/**
+	 * Validate, activate, and enqueue a wizard draft.
+	 */
+	public function start_draft( WP_REST_Request $request ): WP_REST_Response|WP_Error {
+		global $wpdb;
+		$transaction_open = false;
+		try {
+			$id     = (int) $request['id'];
+			$params = (array) $request->get_json_params();
+			$draft  = $this->presets->find( $id );
+			if ( ! $draft || 'draft' !== $draft['status'] ) {
+				throw new InvalidArgumentException( 'Wizard draft not found.' );
+			}
+			$draft_config   = (array) $draft['config'];
+			$missing_policy = (string) ( $draft_config['missing_policy'] ?? 'keep' );
+			if (
+				in_array( $missing_policy, array( 'draft', 'outofstock', 'trash' ), true )
+				&& sanitize_key( (string) ( $params['confirm_missing_policy'] ?? '' ) ) !== $missing_policy
+			) {
+				return new WP_Error(
+					'tds_importer_destructive_confirmation_required',
+					'Confirm the configured missing-product action before starting the import.',
+					array( 'status' => 400 )
+				);
+			}
+			$preflight = $this->perform_preflight( $id );
+			if ( empty( $preflight['valid'] ) ) {
+				return new WP_Error(
+					'tds_importer_preflight_failed',
+					'Preflight validation failed.',
+					array(
+						'status'    => 422,
+						'preflight' => $preflight,
+					)
+				);
+			}
+			$wpdb->query( 'START TRANSACTION' );
+			$transaction_open = true;
+			$preset           = $this->presets->activate_draft( $id, (int) ( $params['revision'] ?? 0 ) );
+			$job_id           = $this->jobs->create( $id );
+			$wpdb->query( 'COMMIT' );
+			$transaction_open = false;
+			$this->scheduler->sync( $id );
+			$this->enqueue( $job_id );
+			return new WP_REST_Response(
+				array(
+					'preset'    => $preset,
+					'job'       => $this->jobs->find( $job_id ),
+					'preflight' => $preflight,
+				),
+				201
+			);
+		} catch ( \Throwable $error ) {
+			if ( $transaction_open ) {
+				$wpdb->query( 'ROLLBACK' );
+			}
+			return $this->error( $error );
+		}
+	}
+
 	public function save_preset( WP_REST_Request $request ): WP_REST_Response|WP_Error {
 		try {
-			$id     = $request['id'] ? (int) $request['id'] : null;
+			$id = $request['id'] ? (int) $request['id'] : null;
+			if ( $id ) {
+				$existing = $this->presets->find( $id );
+				if ( $existing && 'draft' === $existing['status'] ) {
+					throw new InvalidArgumentException( 'Wizard drafts must be edited through the wizard API.' );
+				}
+			}
 			$preset = $this->presets->save( (array) $request->get_json_params(), $id );
 			$this->scheduler->sync( (int) $preset['id'] );
 			return new WP_REST_Response( $preset, $id ? 200 : 201 );
@@ -181,7 +452,12 @@ final class RestController {
 
 	public function delete_preset( WP_REST_Request $request ): WP_REST_Response|WP_Error {
 		try {
-			$this->presets->delete( (int) $request['id'] );
+			$id     = (int) $request['id'];
+			$preset = $this->presets->find( $id );
+			if ( $preset && 'draft' === $preset['status'] ) {
+				throw new InvalidArgumentException( 'Wizard drafts must be discarded through the wizard API.' );
+			}
+			$this->presets->delete( $id );
 			return new WP_REST_Response( null, 204 );
 		} catch ( \Throwable $error ) {
 			return $this->error( $error );
@@ -208,57 +484,10 @@ final class RestController {
 	}
 
 	public function preflight( WP_REST_Request $request ): WP_REST_Response|WP_Error {
-		$path = null;
 		try {
-			$preset = $this->presets->find( (int) $request['id'] );
-			if ( ! $preset ) {
-				throw new InvalidArgumentException( 'Preset not found.' );
-			}
-			$config = (array) $preset['config'];
-			$errors = $this->mapper->validate( $config );
-			if ( $errors ) {
-				return new WP_REST_Response(
-					array(
-						'valid'   => false,
-						'errors'  => $errors,
-						'samples' => array(),
-					)
-				);
-			}
-			$path    = $this->sources->materialize( $config );
-			$records = $this->parsers->preview( $path, $config, 20 );
-			$mapped  = array_map( fn( array $row ): array => $this->mapper->map( $row, $config ), $records );
-			$keys    = array_map(
-				fn( array $row ): string => trim( (string) ( $row[ 'external_id' === $config['identity'] ? 'external_id' : 'sku' ] ?? '' ) ),
-				$mapped
-			);
-			if ( count( $keys ) !== count( array_unique( $keys ) ) ) {
-				$errors[] = 'Duplicate identifiers occur in the preflight sample.';
-			}
-			if ( in_array( '', $keys, true ) ) {
-				$errors[] = 'At least one sample record has an empty identifier.';
-			}
-			return new WP_REST_Response(
-				array(
-					'valid'   => ! $errors,
-					'errors'  => $errors,
-					'samples' => array_map(
-						static fn( array $raw, array $result ): array => array(
-							'raw'    => $raw,
-							'result' => $result,
-						),
-						$records,
-						$mapped
-					),
-					'hash'    => hash_file( 'sha256', $path ),
-				)
-			);
+			return new WP_REST_Response( $this->perform_preflight( (int) $request['id'] ) );
 		} catch ( \Throwable $error ) {
 			return $this->error( $error );
-		} finally {
-			if ( $path && is_file( $path ) ) {
-				wp_delete_file( $path );
-			}
 		}
 	}
 
@@ -288,7 +517,8 @@ final class RestController {
 	public function start_job( WP_REST_Request $request ): WP_REST_Response|WP_Error {
 		try {
 			$preset_id = (int) $request->get_param( 'preset_id' );
-			if ( ! $this->presets->find( $preset_id ) ) {
+			$preset    = $this->presets->find( $preset_id );
+			if ( ! $preset || 'active' !== $preset['status'] ) {
 				throw new InvalidArgumentException( 'Preset not found.' );
 			}
 			$job_id = $this->jobs->create( $preset_id );
@@ -307,17 +537,20 @@ final class RestController {
 			if ( ! $job ) {
 				throw new InvalidArgumentException( 'Job not found.' );
 			}
-			if ( 'pause' === $action && in_array( $job['status'], array( 'queued', 'running' ), true ) ) {
+			if ( 'pause' === $action && 'rollback' !== $job['phase'] && in_array( $job['status'], array( 'queued', 'running' ), true ) ) {
 				$this->jobs->update( $id, array( 'status' => 'paused' ) );
 			} elseif ( 'resume' === $action && 'paused' === $job['status'] ) {
 				$this->jobs->update( $id, array( 'status' => 'queued' ) );
 				$this->enqueue( $id );
 			} elseif ( 'cancel' === $action && in_array( $job['status'], array( 'queued', 'running', 'paused' ), true ) ) {
+				$preset = $this->presets->find( (int) $job['preset_id'] );
+				$days   = max( 1, (int) ( $preset['config']['retention_days'] ?? 30 ) );
 				$this->jobs->update(
 					$id,
 					array(
-						'status'       => 'cancelled',
-						'completed_at' => current_time( 'mysql', true ),
+						'status'         => 'cancelled',
+						'completed_at'   => current_time( 'mysql', true ),
+						'rollback_until' => gmdate( 'Y-m-d H:i:s', time() + DAY_IN_SECONDS * $days ),
 					)
 				);
 			} else {
@@ -342,6 +575,20 @@ final class RestController {
 
 	public function job_logs( WP_REST_Request $request ): WP_REST_Response {
 		return new WP_REST_Response( $this->jobs->logs( (int) $request['id'] ) );
+	}
+
+	/**
+	 * Return one live job with its latest log entries.
+	 */
+	public function job_detail( WP_REST_Request $request ): WP_REST_Response|WP_Error {
+		$job = $this->jobs->find( (int) $request['id'] );
+		if ( ! $job ) {
+			return new WP_Error( 'tds_importer_not_found', 'Job not found.', array( 'status' => 404 ) );
+		}
+		$job['logs']            = $this->jobs->recent_logs( (int) $job['id'] );
+		$job['metrics']         = $this->jobs->metrics( $job );
+		$job['recent_warnings'] = $this->jobs->recent_warnings( (int) $job['id'], 5 );
+		return new WP_REST_Response( $job );
 	}
 
 	/**
@@ -418,8 +665,124 @@ final class RestController {
 		}
 	}
 
+	/**
+	 * Run the shared preflight implementation.
+	 *
+	 * @return array<string,mixed>
+	 */
+	private function perform_preflight( int $preset_id ): array {
+		$path   = null;
+		$preset = $this->presets->find( $preset_id );
+		if ( ! $preset ) {
+			throw new InvalidArgumentException( 'Preset not found.' );
+		}
+		$config = (array) $preset['config'];
+		$errors = $this->mapper->validate( $config );
+		if ( $errors ) {
+			return array(
+				'valid'   => false,
+				'errors'  => $errors,
+				'samples' => array(),
+			);
+		}
+		try {
+			$path    = $this->sources->materialize( $config );
+			$records = $this->parsers->preview( $path, $config, 20 );
+			$mapped  = array_map( fn( array $row ): array => $this->mapper->map( $row, $config ), $records );
+			$keys    = array_map(
+				fn( array $row ): string => trim( (string) ( $row[ 'external_id' === $config['identity'] ? 'external_id' : 'sku' ] ?? '' ) ),
+				$mapped
+			);
+			if ( count( $keys ) !== count( array_unique( $keys ) ) ) {
+				$errors[] = 'Duplicate identifiers occur in the preflight sample.';
+			}
+			if ( in_array( '', $keys, true ) ) {
+				$errors[] = 'At least one sample record has an empty identifier.';
+			}
+			return array(
+				'valid'   => ! $errors,
+				'errors'  => $errors,
+				'samples' => array_map(
+					static fn( array $raw, array $result ): array => array(
+						'raw'    => $raw,
+						'result' => $result,
+					),
+					$records,
+					$mapped
+				),
+				'hash'    => hash_file( 'sha256', $path ),
+			);
+		} finally {
+			if ( $path && is_file( $path ) ) {
+				wp_delete_file( $path );
+			}
+		}
+	}
+
+	/**
+	 * Bound preview field counts, values, depth, and repeated array items.
+	 *
+	 * @param array<int,array<string,mixed>> $records   Preview records.
+	 * @param bool                           $truncated Whether any preview limit was reached.
+	 * @return array<int,array<string,mixed>>
+	 */
+	private function bound_preview_records( array $records, bool &$truncated ): array {
+		$allowed = array();
+		foreach ( $records as $record ) {
+			foreach ( array_keys( $record ) as $field ) {
+				$field = (string) $field;
+				if ( isset( $allowed[ $field ] ) ) {
+					continue;
+				}
+				if ( count( $allowed ) >= self::PREVIEW_FIELDS ) {
+					$truncated = true;
+					continue;
+				}
+				$allowed[ $field ] = true;
+			}
+		}
+
+		$output = array();
+		foreach ( $records as $record ) {
+			$row = array();
+			foreach ( $record as $field => $value ) {
+				if ( isset( $allowed[ (string) $field ] ) ) {
+					$row[ (string) $field ] = $this->bound_preview_value( $value, 0, $truncated );
+				}
+			}
+			$output[] = $row;
+		}
+		return $output;
+	}
+
+	/**
+	 * Bound one nested preview value.
+	 */
+	private function bound_preview_value( mixed $value, int $depth, bool &$truncated ): mixed {
+		if ( is_array( $value ) ) {
+			if ( $depth >= self::PREVIEW_DEPTH ) {
+				$truncated = true;
+				return array();
+			}
+			$output = array();
+			foreach ( $value as $key => $child ) {
+				if ( count( $output ) >= self::PREVIEW_ARRAY_ITEMS ) {
+					$truncated = true;
+					break;
+				}
+				$output[ $key ] = $this->bound_preview_value( $child, $depth + 1, $truncated );
+			}
+			return $output;
+		}
+		if ( is_string( $value ) && mb_strlen( $value ) > self::PREVIEW_VALUE_CHARS ) {
+			$truncated = true;
+			return mb_substr( $value, 0, self::PREVIEW_VALUE_CHARS );
+		}
+		return is_scalar( $value ) || null === $value ? $value : null;
+	}
+
 	private function error( \Throwable $error ): WP_Error {
-		$status = $error instanceof InvalidArgumentException ? 400 : 500;
+		$status = $error instanceof ConflictException ? 409 : ( $error instanceof InvalidArgumentException ? 400 : 500 );
 		return new WP_Error( 'tds_importer_error', $error->getMessage(), array( 'status' => $status ) );
 	}
 }

@@ -4,6 +4,7 @@ namespace TDS\ProductImporter\Tests\Unit;
 
 use PHPUnit\Framework\TestCase;
 use TDS\ProductImporter\Domain\Parsing\CsvParser;
+use TDS\ProductImporter\Domain\Parsing\XmlParser;
 
 final class ScaleParserTest extends TestCase {
 	public function test_streams_twenty_five_thousand_records_with_bounded_memory(): void {
@@ -29,5 +30,29 @@ final class ScaleParserTest extends TestCase {
 		self::assertSame( 25000, $count );
 		self::assertLessThan( 12 * 1024 * 1024, $growth );
 	}
-}
 
+	public function test_streams_twenty_five_thousand_xml_records_with_bounded_memory(): void {
+		$path   = tempnam( sys_get_temp_dir(), 'tds-scale-xml-' );
+		$handle = fopen( $path, 'wb' );
+		fwrite( $handle, '<catalog>' );
+		for ( $i = 1; $i <= 25000; ++$i ) {
+			fwrite( $handle, "<product><sku>XML-$i</sku><name>Product $i</name></product>" );
+		}
+		fwrite( $handle, '</catalog>' );
+		fclose( $handle );
+
+		$before = memory_get_usage( true );
+		$count  = 0;
+		foreach ( ( new XmlParser() )->records( $path, array( 'xml' => array( 'record_path' => '/catalog/product' ) ) ) as $row ) {
+			++$count;
+			if ( 25000 === $count ) {
+				self::assertSame( 'XML-25000', $row['sku'] );
+			}
+		}
+		$growth = memory_get_usage( true ) - $before;
+		unlink( $path );
+
+		self::assertSame( 25000, $count );
+		self::assertLessThan( 12 * 1024 * 1024, $growth );
+	}
+}

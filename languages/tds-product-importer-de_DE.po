@@ -1,6 +1,6 @@
 msgid ""
 msgstr ""
-"Project-Id-Version: TDS Product Importer 1.0.1\n"
+"Project-Id-Version: TDS Product Importer 2.0.0\n"
 "Language: de_DE\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 
@@ -12,3 +12,21 @@ msgstr "Presets"
 
 msgid "Jobs"
 msgstr "Aufträge"
+
+msgid "TDS Product Importer"
+msgstr "TDS Produktimport"
+
+msgid "Loading TDS Product Importer..."
+msgstr "TDS Produktimport wird geladen ..."
+
+msgid "Open importer"
+msgstr "Importer öffnen"
+
+msgid "TDS Product Importer requires PHP 8.1 or newer."
+msgstr "TDS Product Importer benötigt PHP 8.1 oder neuer."
+
+msgid "TDS Product Importer requires PHP 8.1 or newer and WooCommerce 8.2 or newer."
+msgstr "TDS Product Importer benötigt PHP 8.1 oder neuer und WooCommerce 8.2 oder neuer."
+
+msgid "TDS Product Importer could not update its database. Check the WordPress error log and database permissions, then reload this page."
+msgstr "TDS Product Importer konnte seine Datenbank nicht aktualisieren. Prüfen Sie das WordPress-Fehlerprotokoll und die Datenbankberechtigungen und laden Sie diese Seite danach neu."

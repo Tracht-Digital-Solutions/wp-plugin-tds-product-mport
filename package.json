@@ -1,14 +1,21 @@
 {
   "name": "tds-product-importer",
-  "version": "1.0.1",
+  "version": "2.0.0",
   "private": true,
   "author": "Julian Tracht von Tracht Digital Solutions",
   "description": "Admin application and release tooling for TDS Product Importer.",
   "scripts": {
     "build": "node tools/build-assets.mjs",
-    "lint:js": "node --check assets/admin.js && node --check tools/build-assets.mjs",
+    "lint:js": "node --check assets/admin.js && node --check assets/admin-utils.js && node --check tools/build-assets.mjs && node --check tools/package.mjs && node --check playwright.config.mjs && node --check tests/e2e/wizard.spec.mjs",
     "test:js": "node --test tests/js/*.test.mjs",
+    "test:e2e": "playwright test",
+    "prepackage": "npm run build",
     "package": "node tools/package.mjs"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.13.0",
+    "@playwright/test": "1.62.1",
+    "@wordpress/env": "11.12.0"
   },
   "engines": {
     "node": ">=20"

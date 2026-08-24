@@ -1,6 +1,6 @@
 <?php
 
-const TDS_IMPORTER_VERSION = '1.0.0';
+const TDS_IMPORTER_VERSION = '2.0.0';
 const TDS_IMPORTER_FILE = '';
 const TDS_IMPORTER_DIR = '';
 const TDS_IMPORTER_URL = '';
@@ -28,4 +28,3 @@ function as_unschedule_all_actions( string $hook, ?array $args = null, string $g
 function as_has_scheduled_action( string $hook, ?array $args = null, string $group = '' ): bool {
 	return false;
 }
-

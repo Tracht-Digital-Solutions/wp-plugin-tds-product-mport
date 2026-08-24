@@ -2,9 +2,11 @@
 Contributors: tds
 Tags: woocommerce, product import, csv, xml, inventory
 Requires at least: 6.5
-Tested up to: 6.9
+Tested up to: 7.0.4
 Requires PHP: 8.1
-Stable tag: 1.0.1
+WC requires at least: 8.2
+WC tested up to: 11.0.1
+Stable tag: 2.0.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -12,7 +14,9 @@ Import and update large WooCommerce product catalogs from CSV, XML, HTTPS, or SF
 
 == Description ==
 
-TDS Product Importer processes large catalogs in resumable background batches. It supports mapping previews, safe transformation expressions, scheduled imports, detailed reports, and conflict-aware rollback.
+TDS Product Importer processes large catalogs in resumable background batches. Its guided import wizard covers source setup, automatic structure detection, mapping suggestions, import rules, mandatory preflight validation, and live job progress.
+
+Wizard drafts are autosaved and can be resumed for 30 days. Existing presets are copied safely, so their schedules and running automations remain unchanged. The expert preset editor remains available for advanced configuration.
 
 No telemetry is collected. The plugin only contacts source and media locations explicitly configured by an administrator.
 
@@ -37,7 +41,7 @@ SFTP presets require a pinned OpenSSH SHA256 or MD5 host-key fingerprint. Passwo
 1. Install and activate WooCommerce 8.2 or newer.
 2. Upload and activate the plugin ZIP.
 3. Open WooCommerce > TDS Import.
-4. Create a preset, run its preflight, and start the import.
+4. Choose "New Import" and follow the guided source, structure, mapping, rules, and preflight steps.
 
 == Frequently Asked Questions ==
 
@@ -54,6 +58,13 @@ No. Source secrets are encrypted with keys derived from the WordPress salts.
 No. Expressions use a small, validated language with a fixed function allowlist.
 
 == Changelog ==
+
+= 2.0.0 =
+* Added the TDS-branded step-by-step import wizard with resumable drafts, source detection, mapping suggestions, preflight review, and live job progress.
+* Added resumable staging, bounded previews, per-batch lookup caches, normalized media reuse, job rate/ETA metrics, and stronger global job locking.
+* Improved mapping confirmation, autosave safety, keyboard navigation, focus handling, mobile layouts, and warning visibility.
+* Updated compatibility and development tooling for WordPress 7.0.4 and WooCommerce 11.0.1.
+* Unified local, CI, and GitHub Release packaging for reproducible ZIP and SHA-256 artifacts.
 
 = 1.0.1 =
 * Updated repository metadata after the public repository rename.

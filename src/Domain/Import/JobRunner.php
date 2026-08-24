@@ -24,7 +24,7 @@ final class JobRunner {
 		private SourceManager $sources,
 		private ParserFactory $parsers,
 		private Mapper $mapper,
-		private ProductWriter $writer,
+		private ProductWriterInterface $writer,
 		private RollbackService $rollback
 	) {}
 
@@ -43,40 +43,48 @@ final class JobRunner {
 		if ( ! $job || in_array( $job['status'], array( 'paused', 'cancelled', 'completed', 'partial', 'failed', 'rolled_back' ), true ) ) {
 			return;
 		}
-		if ( ! $this->jobs->can_run( $job_id ) ) {
+		if ( ! $this->jobs->acquire_run_lock( $job_id ) ) {
 			$this->enqueue( $job_id, 60 );
 			return;
 		}
-		if ( 'rollback' === $job['phase'] ) {
-			if ( ! $this->rollback->process( $job_id ) ) {
-				$this->enqueue( $job_id );
-			}
-			return;
-		}
-		$preset = $this->presets->find( (int) $job['preset_id'] );
-		if ( ! $preset ) {
-			$this->fail( $job_id, 'Preset no longer exists.' );
-			return;
-		}
-
 		try {
-			$this->jobs->update(
-				$job_id,
-				array(
-					'status'     => 'running',
-					'started_at' => $job['started_at'] ?: current_time( 'mysql', true ),
-				)
-			);
-			match ( $job['phase'] ) {
-				'fetch' => $this->fetch( $job_id, $preset ),
-				'parse' => $this->parse( $job_id, $preset, $job ),
-				'import' => $this->import( $job_id, $preset ),
-				'relationships' => $this->relationships( $job_id, $preset ),
-				'missing' => $this->missing( $job_id, $preset ),
-				default => throw new RuntimeException( 'Unknown import phase.' ),
-			};
-		} catch ( \Throwable $error ) {
-			$this->fail( $job_id, $error->getMessage() );
+			$job = $this->jobs->find( $job_id );
+			if ( ! $job || in_array( $job['status'], array( 'paused', 'cancelled', 'completed', 'partial', 'failed', 'rolled_back' ), true ) ) {
+				return;
+			}
+			if ( 'rollback' === $job['phase'] ) {
+				if ( ! $this->rollback->process( $job_id ) ) {
+					$this->enqueue( $job_id );
+				}
+				return;
+			}
+			$preset = $this->presets->find( (int) $job['preset_id'] );
+			if ( ! $preset ) {
+				$this->fail( $job_id, 'Preset no longer exists.' );
+				return;
+			}
+
+			try {
+				$this->jobs->update(
+					$job_id,
+					array(
+						'status'     => 'running',
+						'started_at' => $job['started_at'] ?: current_time( 'mysql', true ),
+					)
+				);
+				match ( $job['phase'] ) {
+					'fetch' => $this->fetch( $job_id, $preset ),
+					'parse' => $this->parse( $job_id, $preset, $job ),
+					'import' => $this->import( $job_id, $preset ),
+					'relationships' => $this->relationships( $job_id, $preset ),
+					'missing' => $this->missing( $job_id, $preset ),
+					default => throw new RuntimeException( 'Unknown import phase.' ),
+				};
+			} catch ( \Throwable $error ) {
+				$this->fail( $job_id, $error->getMessage() );
+			}
+		} finally {
+			$this->jobs->release_run_lock();
 		}
 	}
 
@@ -111,11 +119,20 @@ final class JobRunner {
 		if ( $errors ) {
 			throw new InvalidArgumentException( implode( ' ', $errors ) );
 		}
-		$parser = $this->parsers->create( (string) $job['source_path'], $config );
-		$chunk  = array();
-		$seen   = array();
-		$count  = 0;
+		$parser         = $this->parsers->create( (string) $job['source_path'], $config );
+		$chunk          = array();
+		$cursor         = (int) ( $job['parse_cursor'] ?? 0 );
+		$staged_total   = (int) ( $job['staged_total'] ?? 0 );
+		$current_cursor = $cursor;
+		$source_count   = 0;
+		$exhausted      = true;
+		$started        = microtime( true );
+		$limit          = $this->memory_limit();
 		foreach ( $parser->records( (string) $job['source_path'], $config ) as $source_sequence => $payload ) {
+			if ( $source_sequence <= $cursor ) {
+				continue;
+			}
+			++$source_count;
 			$records = array(
 				array(
 					'payload' => $payload,
@@ -146,42 +163,47 @@ final class JobRunner {
 				if ( mb_strlen( $key ) > 190 ) {
 					throw new InvalidArgumentException( "Source identifier in record $source_sequence exceeds 190 characters." );
 				}
-				if ( isset( $seen[ $key ] ) ) {
-					throw new InvalidArgumentException( "Duplicate source identifier '$key'." );
-				}
-				$seen[ $key ] = true;
-				$type         = $record['type'] ?: sanitize_key( (string) ( $mapped['type'] ?? $record['payload'][ $config['type_field'] ] ?? 'simple' ) );
+				$type = $record['type'] ?: sanitize_key( (string) ( $mapped['type'] ?? $record['payload'][ $config['type_field'] ] ?? 'simple' ) );
 				if ( null === $parent_key ) {
 					$parent_key = $key;
 				}
 				$chunk[] = array(
-					'sequence_no' => $count + 1,
+					'sequence_no' => $staged_total + 1,
 					'record_type' => $type,
 					'source_key'  => $key,
 					'parent_key'  => $record['parent'] ? $parent_key : (string) ( $mapped['parent'] ?? $record['payload'][ $config['parent_field'] ] ?? '' ),
 					'payload'     => $record['payload'],
 				);
-				++$count;
-				if ( count( $chunk ) >= 200 ) {
-					$this->jobs->stage( $job_id, $chunk );
-					$chunk = array();
-				}
+				++$staged_total;
+			}
+			$current_cursor = (int) $source_sequence;
+			if ( count( $chunk ) >= 200 ) {
+				$this->jobs->stage_checkpoint( $job_id, $chunk, $current_cursor, $staged_total );
+				$chunk = array();
+			}
+			if ( $source_count >= 1000 || microtime( true ) - $started >= 20 || ( $limit > 0 && memory_get_usage( true ) >= (int) ( $limit * 0.7 ) ) ) {
+				$exhausted = false;
+				break;
 			}
 		}
 		if ( $chunk ) {
-			$this->jobs->stage( $job_id, $chunk );
+			$this->jobs->stage_checkpoint( $job_id, $chunk, $current_cursor, $staged_total );
 		}
-		if ( 0 === $count ) {
+		if ( ! $exhausted ) {
+			$this->enqueue( $job_id );
+			return;
+		}
+		if ( 0 === $staged_total ) {
 			throw new InvalidArgumentException( 'The source contains no product records.' );
 		}
 		$this->jobs->update(
 			$job_id,
 			array(
 				'phase' => 'import',
-				'total' => $count,
+				'total' => $staged_total,
 			)
 		);
-		$this->jobs->log( $job_id, 'info', "$count source records staged.", 'source_parsed' );
+		$this->jobs->log( $job_id, 'info', "$staged_total source records staged.", 'source_parsed' );
 		$this->enqueue( $job_id );
 	}
 
@@ -191,17 +213,22 @@ final class JobRunner {
 	 * @param array<string,mixed> $preset Preset.
 	 */
 	private function import( int $job_id, array $preset ): void {
-		$config  = (array) $preset['config'];
-		$items   = $this->jobs->pending_items( $job_id, (int) ( $config['batch_size'] ?? 50 ) );
-		$started = microtime( true );
-		$limit   = $this->memory_limit();
+		$this->writer->reset_caches();
+		$config      = (array) $preset['config'];
+		$items       = $this->jobs->pending_items( $job_id, (int) ( $config['batch_size'] ?? 50 ) );
+		$started     = microtime( true );
+		$limit       = $this->memory_limit();
+		$retry_delay = 0;
 		foreach ( $items as $item ) {
 			try {
 				$fields = $this->mapper->map( (array) $item['payload'], $config );
 				$result = $this->writer->write( $fields, $item, $preset, $job_id );
 				$this->jobs->complete_item( (int) $item['id'], $job_id, $result['result'], $result['product_id'] );
 			} catch ( RuntimeException $error ) {
-				$this->jobs->retry_item( (int) $item['id'], $job_id, 'transient_error', $error->getMessage() );
+				$will_retry = $this->jobs->retry_item( (int) $item['id'], $job_id, 'transient_error', $error->getMessage() );
+				if ( $will_retry ) {
+					$retry_delay = max( $retry_delay, min( 300, 30 * ( 2 ** (int) $item['attempts'] ) ) );
+				}
 				$this->jobs->log( $job_id, 'warning', $error->getMessage(), 'transient_error', array( 'record' => $item['sequence_no'] ) );
 			} catch ( \Throwable $error ) {
 				$this->jobs->complete_item( (int) $item['id'], $job_id, 'failed', null, 'record_error', $error->getMessage() );
@@ -212,7 +239,7 @@ final class JobRunner {
 			}
 		}
 		if ( $this->jobs->pending_items( $job_id, 1 ) ) {
-			$this->enqueue( $job_id );
+			$this->enqueue( $job_id, $retry_delay );
 			return;
 		}
 		$this->jobs->update( $job_id, array( 'phase' => 'relationships' ) );
@@ -225,6 +252,7 @@ final class JobRunner {
 	 * @param array<string,mixed> $preset Preset.
 	 */
 	private function relationships( int $job_id, array $preset ): void {
+		$this->writer->reset_caches();
 		$config = (array) $preset['config'];
 		$items  = $this->jobs->relationship_items( $job_id, (int) ( $config['batch_size'] ?? 50 ) );
 		foreach ( $items as $item ) {
@@ -328,17 +356,19 @@ final class JobRunner {
 	 * Mark a fatal job error and send scheduled-run notification.
 	 */
 	private function fail( int $job_id, string $message ): void {
+		$job    = $this->jobs->find( $job_id );
+		$preset = $job ? $this->presets->find( (int) $job['preset_id'] ) : null;
+		$days   = max( 1, (int) ( $preset['config']['retention_days'] ?? 30 ) );
 		$this->jobs->update(
 			$job_id,
 			array(
-				'status'       => 'failed',
-				'completed_at' => current_time( 'mysql', true ),
-				'message'      => $message,
+				'status'         => 'failed',
+				'completed_at'   => current_time( 'mysql', true ),
+				'rollback_until' => gmdate( 'Y-m-d H:i:s', time() + DAY_IN_SECONDS * $days ),
+				'message'        => $message,
 			)
 		);
 		$this->jobs->log( $job_id, 'error', $message, 'job_failed' );
-		$job    = $this->jobs->find( $job_id );
-		$preset = $job ? $this->presets->find( (int) $job['preset_id'] ) : null;
 		if ( $preset && ! empty( $preset['config']['email'] ) ) {
 			wp_mail(
 				(string) $preset['config']['email'],

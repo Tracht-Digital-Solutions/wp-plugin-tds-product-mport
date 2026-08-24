@@ -29,7 +29,7 @@ final class AdminPage {
 
 	public function render(): void {
 		echo '<div class="wrap"><div id="tds-importer-admin">';
-		echo '<p>' . esc_html__( 'Loading TDS Product Importer…', 'tds-product-importer' ) . '</p>';
+		echo '<p>' . esc_html__( 'Loading TDS Product Importer...', 'tds-product-importer' ) . '</p>';
 		echo '</div></div>';
 	}
 
@@ -44,9 +44,16 @@ final class AdminPage {
 			TDS_IMPORTER_VERSION
 		);
 		wp_enqueue_script(
+			'tds-importer-admin-utils',
+			TDS_IMPORTER_URL . 'assets/admin-utils.js',
+			array(),
+			TDS_IMPORTER_VERSION,
+			true
+		);
+		wp_enqueue_script(
 			'tds-importer-admin',
 			TDS_IMPORTER_URL . 'assets/admin.js',
-			array( 'wp-api-fetch', 'wp-components', 'wp-element', 'wp-i18n' ),
+			array( 'tds-importer-admin-utils', 'wp-api-fetch', 'wp-components', 'wp-element', 'wp-i18n' ),
 			TDS_IMPORTER_VERSION,
 			true
 		);

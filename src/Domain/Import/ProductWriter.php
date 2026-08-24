@@ -8,6 +8,7 @@
 namespace TDS\ProductImporter\Domain\Import;
 
 use InvalidArgumentException;
+use RuntimeException;
 use TDS\ProductImporter\Infrastructure\JobRepository;
 use WC_Product;
 use WC_Product_Attribute;
@@ -20,8 +21,38 @@ use WC_Product_Variation;
 /**
  * Creates and updates WooCommerce products through CRUD APIs.
  */
-final class ProductWriter {
+final class ProductWriter implements ProductWriterInterface {
+	/** @var array<string,int|null> */
+	private array $linked_product_cache = array();
+
+	/** @var array<string,int|null> */
+	private array $sku_product_cache = array();
+
+	/** @var array<string,int|null> */
+	private array $term_cache = array();
+
+	/** @var array<string,int|null> */
+	private array $media_cache = array();
+
+	/** @var array<int,WC_Product|null> */
+	private array $product_cache = array();
+
+	/** @var array<string,int|null> */
+	private array $external_product_cache = array();
+
 	public function __construct( private JobRepository $jobs ) {}
+
+	/**
+	 * Reset request-local lookup state at the start of a worker batch.
+	 */
+	public function reset_caches(): void {
+		$this->linked_product_cache   = array();
+		$this->sku_product_cache      = array();
+		$this->term_cache             = array();
+		$this->media_cache            = array();
+		$this->product_cache          = array();
+		$this->external_product_cache = array();
+	}
 
 	/**
 	 * Persist one mapped product.
@@ -40,11 +71,12 @@ final class ProductWriter {
 		$product_id = $this->find_product( (int) $preset['id'], $source_key, $config );
 		$is_new     = ! $product_id;
 		$type       = sanitize_key( (string) ( $fields['type'] ?? $item['record_type'] ?? 'simple' ) );
-		$product    = $is_new ? $this->new_product( $type ) : wc_get_product( $product_id );
+		$product    = $is_new ? $this->new_product( $type ) : $this->product( $product_id );
 		if ( ! $product instanceof WC_Product ) {
 			throw new InvalidArgumentException( 'The matched WooCommerce product no longer exists.' );
 		}
 
+		$previous_sku = '';
 		if ( ! $is_new ) {
 			$this->jobs->snapshot( $job_id, $product->get_id(), false, self::capture( $product->get_id() ) );
 			if ( 'variation' !== $type && $product->get_type() !== $type && in_array( $type, array( 'simple', 'variable', 'grouped', 'external' ), true ) ) {
@@ -52,6 +84,7 @@ final class ProductWriter {
 				clean_post_cache( $product->get_id() );
 				$product = $this->new_product( $type, $product->get_id() );
 			}
+			$previous_sku = trim( (string) $product->get_sku() );
 		}
 		if ( $product instanceof WC_Product_Variation ) {
 			$parent_id = $this->resolve_reference( (int) $preset['id'], (string) ( $item['parent_key'] ?? '' ) );
@@ -67,26 +100,36 @@ final class ProductWriter {
 		$this->set_attributes( $product, $fields );
 		$this->set_downloads( $product, $fields );
 		$this->set_meta( $product, $fields );
+		$product->update_meta_data( '_tds_import_last_job', (string) $job_id );
+		if ( $is_new ) {
+			$product->update_meta_data( '_tds_import_created_job', (string) $job_id );
+		}
+		if ( 'external_id' === ( $config['identity'] ?? 'sku' ) ) {
+			$product->update_meta_data( '_tds_import_external_id', $source_key );
+			$product->update_meta_data( '_tds_import_external_identity', $this->external_identity( (int) $preset['id'], $source_key ) );
+		}
 		$product_id = $product->save();
 		$this->set_acf( $product_id, $fields );
 
 		if ( $is_new ) {
 			$this->jobs->snapshot( $job_id, $product_id, true, null );
 		}
-		$this->set_media( $product, $fields, $created_media );
-		$product->save();
-		update_post_meta( $product_id, '_tds_import_last_job', $job_id );
-		if ( 'external_id' === ( $config['identity'] ?? 'sku' ) ) {
-			update_post_meta( $product_id, '_tds_import_external_id', $source_key );
-		}
-		$this->jobs->set_created_media( $job_id, $product_id, $created_media );
-		$this->jobs->set_snapshot_fingerprint( $job_id, $product_id, self::fingerprint( $product_id ) );
 		$this->jobs->link( (int) $preset['id'], $source_key, $product_id, $job_id );
+		$this->remember_product( (int) $preset['id'], $source_key, $product, $previous_sku );
+		if ( 'external_id' === ( $config['identity'] ?? 'sku' ) ) {
+			$this->external_product_cache[ $this->external_identity( (int) $preset['id'], $source_key ) ] = $product_id;
+		}
+		// Record a post-core fingerprint so a media failure can still be rolled back safely.
+		$this->jobs->set_snapshot_fingerprint( $job_id, $product_id, self::fingerprint( $product_id ) );
+		$this->set_media( $product, $fields, $created_media, $job_id );
+		$product->save();
+		$this->jobs->set_snapshot_fingerprint( $job_id, $product_id, self::fingerprint( $product_id ) );
 
 		do_action( 'tds_importer_product_saved', $product_id, $job_id, $fields );
+		$created_in_job = $is_new || $job_id === (int) $product->get_meta( '_tds_import_created_job', true );
 		return array(
 			'product_id' => $product_id,
-			'result'     => $is_new ? 'created' : 'updated',
+			'result'     => $created_in_job ? 'created' : 'updated',
 		);
 	}
 
@@ -97,10 +140,9 @@ final class ProductWriter {
 	 */
 	private function find_product( int $preset_id, string $source_key, array $config ): ?int {
 		if ( 'external_id' === ( $config['identity'] ?? 'sku' ) ) {
-			return $this->jobs->linked_product( $preset_id, $source_key );
+			return $this->linked_product( $preset_id, $source_key ) ?: $this->external_product( $preset_id, $source_key );
 		}
-		$id = wc_get_product_id_by_sku( $source_key );
-		return $id ? (int) $id : null;
+		return $this->sku_product( $source_key );
 	}
 
 	/**
@@ -296,15 +338,23 @@ final class ProductWriter {
 	 * @param array<string,mixed> $fields  Fields.
 	 * @param int[]               $created Created media IDs.
 	 */
-	private function set_media( WC_Product $product, array $fields, array &$created ): void {
+	private function set_media( WC_Product $product, array $fields, array &$created, int $job_id ): void {
 		if ( array_key_exists( 'image', $fields ) ) {
-			$id = $this->image_id( (string) $fields['image'], $product->get_id(), $created );
+			$created_before = count( $created );
+			$id             = $this->image_id( (string) $fields['image'], $product->get_id(), $created );
 			$product->set_image_id( $id );
+			if ( count( $created ) > $created_before ) {
+				$this->jobs->set_created_media( $job_id, $product->get_id(), $created );
+			}
 		}
 		if ( array_key_exists( 'gallery_images', $fields ) ) {
 			$ids = array();
 			foreach ( $this->list_value( $fields['gallery_images'] ) as $url ) {
-				$ids[] = $this->image_id( $url, $product->get_id(), $created );
+				$created_before = count( $created );
+				$ids[]          = $this->image_id( $url, $product->get_id(), $created );
+				if ( count( $created ) > $created_before ) {
+					$this->jobs->set_created_media( $job_id, $product->get_id(), $created );
+				}
 			}
 			$product->set_gallery_image_ids( array_filter( $ids ) );
 		}
@@ -335,7 +385,7 @@ final class ProductWriter {
 	 * @param array<string,mixed> $fields Fields.
 	 */
 	public function apply_relationships( int $product_id, array $fields, int $preset_id, int $job_id ): void {
-		$product = wc_get_product( $product_id );
+		$product = $this->product( $product_id );
 		if ( ! $product ) {
 			throw new InvalidArgumentException( 'Product disappeared before relationship processing.' );
 		}
@@ -352,7 +402,96 @@ final class ProductWriter {
 		if ( '' === $key ) {
 			return null;
 		}
-		return $this->jobs->linked_product( $preset_id, $key ) ?: ( wc_get_product_id_by_sku( $key ) ?: null );
+		return $this->linked_product( $preset_id, $key ) ?: $this->sku_product( $key );
+	}
+
+	/**
+	 * Return a cached product link, including a cached miss.
+	 */
+	private function linked_product( int $preset_id, string $source_key ): ?int {
+		$cache_key = $preset_id . "\0" . $source_key;
+		if ( array_key_exists( $cache_key, $this->linked_product_cache ) ) {
+			return $this->linked_product_cache[ $cache_key ];
+		}
+
+		$this->linked_product_cache[ $cache_key ] = $this->jobs->linked_product( $preset_id, $source_key );
+		return $this->linked_product_cache[ $cache_key ];
+	}
+
+	/**
+	 * Return a cached SKU lookup, including a cached miss.
+	 */
+	private function sku_product( string $sku ): ?int {
+		$sku = trim( $sku );
+		if ( '' === $sku ) {
+			return null;
+		}
+		if ( array_key_exists( $sku, $this->sku_product_cache ) ) {
+			return $this->sku_product_cache[ $sku ];
+		}
+
+		$product_id = wc_get_product_id_by_sku( $sku );
+
+		$this->sku_product_cache[ $sku ] = $product_id ? (int) $product_id : null;
+		return $this->sku_product_cache[ $sku ];
+	}
+
+	/**
+	 * Recover an externally identified product saved before its source link.
+	 */
+	private function external_product( int $preset_id, string $source_key ): ?int {
+		$identity = $this->external_identity( $preset_id, $source_key );
+		if ( array_key_exists( $identity, $this->external_product_cache ) ) {
+			return $this->external_product_cache[ $identity ];
+		}
+		$found = get_posts(
+			array(
+				'post_type'      => array( 'product', 'product_variation' ),
+				'post_status'    => 'any',
+				'posts_per_page' => 2,
+				'fields'         => 'ids',
+				'meta_key'       => '_tds_import_external_identity',
+				'meta_value'     => $identity,
+			)
+		);
+		if ( count( $found ) > 1 ) {
+			throw new InvalidArgumentException( "External identifier '$source_key' matches more than one product." );
+		}
+		$this->external_product_cache[ $identity ] = $found ? (int) $found[0] : null;
+		return $this->external_product_cache[ $identity ];
+	}
+
+	/**
+	 * Cache product objects and misses for the current worker batch.
+	 */
+	private function product( int $product_id ): ?WC_Product {
+		if ( array_key_exists( $product_id, $this->product_cache ) ) {
+			return $this->product_cache[ $product_id ];
+		}
+		$product                            = wc_get_product( $product_id );
+		$this->product_cache[ $product_id ] = $product instanceof WC_Product ? $product : null;
+		return $this->product_cache[ $product_id ];
+	}
+
+	private function external_identity( int $preset_id, string $source_key ): string {
+		return hash( 'sha256', $preset_id . "\0" . mb_strtolower( trim( $source_key ), 'UTF-8' ) );
+	}
+
+	/**
+	 * Update caches immediately after a product and its source link are saved.
+	 */
+	private function remember_product( int $preset_id, string $source_key, WC_Product $product, string $previous_sku ): void {
+		$product_id = $product->get_id();
+		$this->linked_product_cache[ $preset_id . "\0" . $source_key ] = $product_id;
+		$this->product_cache[ $product_id ]                            = $product;
+
+		$current_sku = trim( (string) $product->get_sku() );
+		if ( '' !== $previous_sku && $previous_sku !== $current_sku ) {
+			$this->sku_product_cache[ $previous_sku ] = null;
+		}
+		if ( '' !== $current_sku ) {
+			$this->sku_product_cache[ $current_sku ] = $product_id;
+		}
 	}
 
 	/**
@@ -361,29 +500,38 @@ final class ProductWriter {
 	 * @param int[] $created Created attachments.
 	 */
 	private function image_id( string $url, int $product_id, array &$created ): int {
-		$url = esc_url_raw( trim( $url ), array( 'https' ) );
+		$raw_url = esc_url_raw( trim( $url ), array( 'https' ) );
+		$url     = self::normalize_media_url( $raw_url );
 		if ( '' === $url ) {
 			return 0;
 		}
-		$hash  = hash( 'sha256', $url );
-		$found = get_posts(
-			array(
-				'post_type'      => 'attachment',
-				'posts_per_page' => 1,
-				'fields'         => 'ids',
-				'meta_key'       => '_tds_import_source_hash',
-				'meta_value'     => $hash,
-			)
-		);
-		if ( $found ) {
-			return (int) $found[0];
+		$hash = hash( 'sha256', $url );
+		if ( array_key_exists( $hash, $this->media_cache ) && null !== $this->media_cache[ $hash ] ) {
+			return (int) $this->media_cache[ $hash ];
 		}
+
+		if ( ! array_key_exists( $hash, $this->media_cache ) ) {
+			$attachment_id = $this->attachment_by_source_hash( $hash );
+			$legacy_hash   = hash( 'sha256', $raw_url );
+			if ( ! $attachment_id && ! hash_equals( $hash, $legacy_hash ) ) {
+				$attachment_id = $this->attachment_by_source_hash( $legacy_hash );
+				if ( $attachment_id ) {
+					update_post_meta( $attachment_id, '_tds_import_source_hash', $hash );
+					update_post_meta( $attachment_id, '_tds_import_source_url', $url );
+				}
+			}
+			$this->media_cache[ $hash ] = $attachment_id;
+			if ( $attachment_id ) {
+				return $attachment_id;
+			}
+		}
+
 		require_once ABSPATH . 'wp-admin/includes/file.php';
 		require_once ABSPATH . 'wp-admin/includes/media.php';
 		require_once ABSPATH . 'wp-admin/includes/image.php';
 		$temp = download_url( $url, 30 );
 		if ( is_wp_error( $temp ) ) {
-			throw new InvalidArgumentException( 'Image download failed: ' . $temp->get_error_message() );
+			throw new RuntimeException( 'Image download failed: ' . $temp->get_error_message() );
 		}
 		$file = array(
 			'name'     => sanitize_file_name( basename( (string) wp_parse_url( $url, PHP_URL_PATH ) ) ?: 'product-image.jpg' ),
@@ -392,22 +540,86 @@ final class ProductWriter {
 		$id   = media_handle_sideload( $file, $product_id );
 		if ( is_wp_error( $id ) ) {
 			wp_delete_file( $temp );
-			throw new InvalidArgumentException( 'Image import failed: ' . $id->get_error_message() );
+			throw new RuntimeException( 'Image import failed: ' . $id->get_error_message() );
 		}
 		update_post_meta( $id, '_tds_import_source_hash', $hash );
+		update_post_meta( $id, '_tds_import_source_url', $url );
 		$created[] = (int) $id;
+
+		$this->media_cache[ $hash ] = (int) $id;
 		return (int) $id;
 	}
 
+	/**
+	 * Find a previously imported attachment by its source hash.
+	 */
+	private function attachment_by_source_hash( string $hash ): ?int {
+		$found = get_posts(
+			array(
+				'post_type'      => 'attachment',
+				'post_status'    => 'inherit',
+				'posts_per_page' => 1,
+				'fields'         => 'ids',
+				'meta_key'       => '_tds_import_source_hash',
+				'meta_value'     => $hash,
+			)
+		);
+
+		return $found ? (int) $found[0] : null;
+	}
+
+	/**
+	 * Normalize a media URL without changing its path or query string.
+	 */
+	private static function normalize_media_url( string $url ): string {
+		$parts = wp_parse_url( $url );
+		if ( ! is_array( $parts ) || empty( $parts['scheme'] ) || empty( $parts['host'] ) ) {
+			return '';
+		}
+
+		$scheme = strtolower( (string) $parts['scheme'] );
+		if ( 'https' !== $scheme ) {
+			return '';
+		}
+
+		$user_info = '';
+		if ( isset( $parts['user'] ) ) {
+			$user_info = (string) $parts['user'];
+			if ( isset( $parts['pass'] ) ) {
+				$user_info .= ':' . (string) $parts['pass'];
+			}
+			$user_info .= '@';
+		}
+		$host = strtolower( (string) $parts['host'] );
+		if ( str_contains( $host, ':' ) && ! str_starts_with( $host, '[' ) ) {
+			$host = '[' . $host . ']';
+		}
+		$port  = isset( $parts['port'] ) && 443 !== (int) $parts['port'] ? ':' . (int) $parts['port'] : '';
+		$path  = isset( $parts['path'] ) ? (string) $parts['path'] : '';
+		$query = isset( $parts['query'] ) ? '?' . (string) $parts['query'] : '';
+
+		return $scheme . '://' . $user_info . $host . $port . $path . $query;
+	}
+
 	private function term_id( string $name, string $taxonomy ): int {
-		$term = term_exists( $name, $taxonomy );
+		$cache_key = $taxonomy . "\0" . strtolower( trim( $name ) );
+		if ( array_key_exists( $cache_key, $this->term_cache ) && null !== $this->term_cache[ $cache_key ] ) {
+			return (int) $this->term_cache[ $cache_key ];
+		}
+
+		$term = array_key_exists( $cache_key, $this->term_cache ) ? null : term_exists( $name, $taxonomy );
 		if ( ! $term ) {
+			$this->term_cache[ $cache_key ] = null;
+
 			$term = wp_insert_term( $name, $taxonomy );
 		}
 		if ( is_wp_error( $term ) ) {
 			throw new InvalidArgumentException( $term->get_error_message() );
 		}
-		return (int) ( is_array( $term ) ? $term['term_id'] : $term );
+		$term_id = (int) ( is_array( $term ) ? $term['term_id'] : $term );
+
+		$this->term_cache[ $cache_key ] = $term_id;
+		return $term_id;
 	}
 
 	/** @return string[] */

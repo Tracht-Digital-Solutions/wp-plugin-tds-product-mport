@@ -13,6 +13,8 @@ use InvalidArgumentException;
  * Stores validated preset configuration and protects credentials.
  */
 final class PresetRepository {
+	private const SECRET_MASK = '********';
+
 	public function __construct(
 		private Database $database,
 		private SecretBox $secrets
@@ -23,13 +25,25 @@ final class PresetRepository {
 	 *
 	 * @return array<int,array<string,mixed>>
 	 */
-	public function all(): array {
+	public function all( string $status = 'active' ): array {
 		global $wpdb;
 		$rows = $wpdb->get_results(
-			"SELECT * FROM {$this->database->table( 'presets' )} ORDER BY updated_at DESC", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+			$wpdb->prepare(
+				"SELECT * FROM {$this->database->table( 'presets' )} WHERE status=%s ORDER BY updated_at DESC", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				$status
+			),
 			ARRAY_A
 		);
 		return array_map( fn( array $row ): array => $this->hydrate( $row, true ), $rows ?: array() );
+	}
+
+	/**
+	 * List resumable wizard drafts.
+	 *
+	 * @return array<int,array<string,mixed>>
+	 */
+	public function drafts(): array {
+		return $this->all( 'draft' );
 	}
 
 	/**
@@ -72,6 +86,8 @@ final class PresetRepository {
 			'name'       => $name,
 			'config'     => wp_json_encode( $config, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ),
 			'enabled'    => empty( $input['enabled'] ) ? 0 : 1,
+			'status'     => 'active',
+			'revision'   => (int) ( $existing['revision'] ?? 0 ) + 1,
 			'updated_at' => $now,
 		);
 		if ( $id ) {
@@ -82,6 +98,174 @@ final class PresetRepository {
 			$id = (int) $wpdb->insert_id;
 		}
 		return $this->find( (int) $id, true ) ?? array();
+	}
+
+	/**
+	 * Create a blank draft or a safe copy of an active preset.
+	 *
+	 * @return array<string,mixed>
+	 */
+	public function create_draft( ?int $parent_preset_id = null ): array {
+		global $wpdb;
+		$parent = $parent_preset_id ? $this->find( $parent_preset_id ) : null;
+		if ( $parent_preset_id && ( ! $parent || 'active' !== $parent['status'] ) ) {
+			throw new InvalidArgumentException( 'The source preset does not exist.' );
+		}
+		$config                        = $parent ? (array) $parent['config'] : $this->sanitize_config( array(), array() );
+		$config['schedule']['enabled'] = false;
+		$now                           = current_time( 'mysql', true );
+		$name                          = $parent
+			? sprintf( '%s - Import %s', $parent['name'], wp_date( 'Y-m-d H:i' ) )
+			: sprintf( 'Import %s', wp_date( 'Y-m-d H:i' ) );
+		$wpdb->insert(
+			$this->database->table( 'presets' ),
+			array(
+				'name'             => $name,
+				'config'           => wp_json_encode( $config, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ),
+				'enabled'          => 0,
+				'status'           => 'draft',
+				'wizard_step'      => 1,
+				'parent_preset_id' => $parent_preset_id,
+				'expires_at'       => gmdate( 'Y-m-d H:i:s', time() + 30 * DAY_IN_SECONDS ),
+				'revision'         => 1,
+				'created_at'       => $now,
+				'updated_at'       => $now,
+			)
+		);
+		return $this->find( (int) $wpdb->insert_id, true ) ?? array();
+	}
+
+	/**
+	 * Save a wizard draft with optimistic locking.
+	 *
+	 * @param array<string,mixed> $input Draft payload.
+	 * @return array<string,mixed>
+	 */
+	public function update_draft( int $id, array $input ): array {
+		global $wpdb;
+		$existing = $this->find( $id );
+		if ( ! $existing || 'draft' !== $existing['status'] ) {
+			throw new InvalidArgumentException( 'Wizard draft not found.' );
+		}
+		$expected_revision = (int) ( $input['revision'] ?? 0 );
+		if ( $expected_revision !== (int) $existing['revision'] ) {
+			throw new ConflictException( 'This draft was changed in another browser session.' );
+		}
+		$config = $this->sanitize_config(
+			is_array( $input['config'] ?? null ) ? $input['config'] : (array) $existing['config'],
+			(array) $existing['config']
+		);
+		$name   = sanitize_text_field( (string) ( $input['name'] ?? $existing['name'] ) );
+		$step   = max( 1, min( 5, (int) ( $input['wizard_step'] ?? $existing['wizard_step'] ) ) );
+		$now    = current_time( 'mysql', true );
+		$result = $wpdb->update(
+			$this->database->table( 'presets' ),
+			array(
+				'name'        => '' === $name ? $existing['name'] : $name,
+				'config'      => wp_json_encode( $config, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ),
+				'wizard_step' => $step,
+				'expires_at'  => gmdate( 'Y-m-d H:i:s', time() + 30 * DAY_IN_SECONDS ),
+				'revision'    => $expected_revision + 1,
+				'updated_at'  => $now,
+			),
+			array(
+				'id'       => $id,
+				'revision' => $expected_revision,
+				'status'   => 'draft',
+			)
+		);
+		if ( 1 !== $result ) {
+			throw new ConflictException( 'This draft was changed in another browser session.' );
+		}
+		return $this->find( $id, true ) ?? array();
+	}
+
+	/**
+	 * Activate a validated draft immediately before creating its first job.
+	 *
+	 * @return array<string,mixed>
+	 */
+	public function activate_draft( int $id, int $expected_revision ): array {
+		global $wpdb;
+		$draft = $this->find( $id );
+		if ( ! $draft || 'draft' !== $draft['status'] ) {
+			throw new InvalidArgumentException( 'Wizard draft not found.' );
+		}
+		if ( (int) $draft['revision'] !== $expected_revision ) {
+			throw new ConflictException( 'This draft was changed in another browser session.' );
+		}
+		$result = $wpdb->update(
+			$this->database->table( 'presets' ),
+			array(
+				'status'      => 'active',
+				'enabled'     => 1,
+				'wizard_step' => 6,
+				'expires_at'  => null,
+				'revision'    => $expected_revision + 1,
+				'updated_at'  => current_time( 'mysql', true ),
+			),
+			array(
+				'id'       => $id,
+				'revision' => $expected_revision,
+				'status'   => 'draft',
+			)
+		);
+		if ( 1 !== $result ) {
+			throw new ConflictException( 'This draft was changed in another browser session.' );
+		}
+		return $this->find( $id, true ) ?? array();
+	}
+
+	/**
+	 * Return expired drafts for cleanup.
+	 *
+	 * @return array<int,array<string,mixed>>
+	 */
+	public function expired_drafts( int $limit = 100 ): array {
+		global $wpdb;
+		$rows = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT * FROM {$this->database->table( 'presets' )} WHERE status='draft' AND expires_at<%s ORDER BY expires_at ASC LIMIT %d", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				current_time( 'mysql', true ),
+				$limit
+			),
+			ARRAY_A
+		);
+		return array_map( fn( array $row ): array => $this->hydrate( $row, false ), $rows ?: array() );
+	}
+
+	/**
+	 * Delete a protected upload when no remaining preset or job references it.
+	 */
+	public function delete_source_if_unreferenced( string $path ): void {
+		global $wpdb;
+		$resolved = Installer::resolve_storage_file( $path );
+		if ( null === $resolved ) {
+			return;
+		}
+		$configs = $wpdb->get_col(
+			"SELECT config FROM {$this->database->table( 'presets' )}" // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared,WordPress.DB.PreparedSQL.NotPrepared
+		);
+		if ( ! is_array( $configs ) ) {
+			return;
+		}
+		foreach ( $configs as $encoded ) {
+			$config    = json_decode( (string) $encoded, true );
+			$candidate = is_array( $config ) ? (string) ( $config['source']['upload_path'] ?? '' ) : '';
+			if ( Installer::resolve_storage_file( $candidate ) === $resolved ) {
+				return;
+			}
+		}
+		$job_references = $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT COUNT(*) FROM {$this->database->table( 'jobs' )} WHERE source_path IN (%s,%s)", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				$path,
+				$resolved
+			)
+		);
+		if ( null !== $job_references && 0 === (int) $job_references ) {
+			wp_delete_file( $resolved );
+		}
 	}
 
 	/**
@@ -130,7 +314,7 @@ final class PresetRepository {
 		);
 		foreach ( array( 'password', 'private_key', 'basic_password' ) as $key ) {
 			$value                = (string) ( $source[ $key ] ?? '' );
-			$clean_source[ $key ] = ( '' === $value || '••••••••' === $value )
+			$clean_source[ $key ] = ( '' === $value || self::SECRET_MASK === $value )
 				? (string) ( $old[ $key ] ?? '' )
 				: $this->secrets->encrypt( $value );
 		}
@@ -209,12 +393,7 @@ final class PresetRepository {
 	 * Ensure a stored upload path remains inside plugin storage.
 	 */
 	private function safe_stored_path( string $path ): string {
-		if ( '' === $path ) {
-			return '';
-		}
-		$root = wp_normalize_path( Installer::storage_dir() );
-		$path = wp_normalize_path( $path );
-		return str_starts_with( $path, $root . '/' ) ? $path : '';
+		return Installer::resolve_storage_file( $path ) ?? '';
 	}
 
 	/**
@@ -228,17 +407,22 @@ final class PresetRepository {
 		if ( $mask ) {
 			foreach ( array( 'password', 'private_key', 'basic_password' ) as $key ) {
 				if ( ! empty( $config['source'][ $key ] ) ) {
-					$config['source'][ $key ] = '••••••••';
+					$config['source'][ $key ] = self::SECRET_MASK;
 				}
 			}
 		}
 		return array(
-			'id'         => (int) $row['id'],
-			'name'       => $row['name'],
-			'config'     => $config,
-			'enabled'    => (bool) $row['enabled'],
-			'created_at' => $row['created_at'],
-			'updated_at' => $row['updated_at'],
+			'id'               => (int) $row['id'],
+			'name'             => $row['name'],
+			'config'           => $config,
+			'enabled'          => (bool) $row['enabled'],
+			'status'           => (string) ( $row['status'] ?? 'active' ),
+			'wizard_step'      => (int) ( $row['wizard_step'] ?? 0 ),
+			'parent_preset_id' => empty( $row['parent_preset_id'] ) ? null : (int) $row['parent_preset_id'],
+			'expires_at'       => $row['expires_at'] ?? null,
+			'revision'         => (int) ( $row['revision'] ?? 1 ),
+			'created_at'       => $row['created_at'],
+			'updated_at'       => $row['updated_at'],
 		);
 	}
 }

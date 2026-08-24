@@ -40,5 +40,30 @@ final class MapperTest extends TestCase {
 		);
 		self::assertNotEmpty( $errors );
 	}
-}
 
+	public function test_expression_ast_cache_is_reused_and_bounded(): void {
+		$mapper = new Mapper( new Evaluator() );
+		for ( $index = 0; $index < 130; ++$index ) {
+			$result = $mapper->map(
+				array( 'value' => 2 ),
+				array(
+					'mappings' => array(
+						array(
+							'target'     => 'name',
+							'expression' => '$value + ' . $index,
+						),
+					),
+				)
+			);
+			self::assertSame( 2.0 + $index, $result['name'] );
+		}
+
+		$cache = new \ReflectionProperty( $mapper, 'expression_cache' );
+		$value = $cache->getValue( $mapper );
+
+		self::assertCount( 128, $value );
+		self::assertArrayNotHasKey( '$value + 0', $value );
+		self::assertArrayNotHasKey( '$value + 1', $value );
+		self::assertArrayHasKey( '$value + 129', $value );
+	}
+}
