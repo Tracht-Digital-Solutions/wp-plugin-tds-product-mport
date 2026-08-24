@@ -251,6 +251,7 @@
 .tds-app .components-button.is-primary {
 	background: var(--tds-cyan-dark);
 	border-color: var(--tds-cyan-dark);
+	color: #fff;
 }
 
 .tds-app .components-button.is-primary:hover:not(:disabled) {

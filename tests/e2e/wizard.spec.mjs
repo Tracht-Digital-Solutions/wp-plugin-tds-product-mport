@@ -4,11 +4,15 @@ import { expect, test } from '@playwright/test';
 const importerUrl = '/wp-admin/admin.php?page=tds-product-importer';
 
 async function login(page) {
-	await page.goto('/wp-login.php');
-	await page.getByLabel(/Username|Email Address/i).fill('admin');
-	await page.locator('#user_pass').fill('password');
-	await page.getByRole('button', { name: /Log In/i }).click();
-	await page.waitForURL(/wp-admin/);
+	await page.goto('/wp-login.php', { waitUntil: 'domcontentloaded' });
+	if (await page.locator('#user_login').isVisible()) {
+		await page.getByLabel(/Username|Email Address/i).fill('admin');
+		await page.locator('#user_pass').fill('password');
+		await Promise.all([
+			page.waitForURL(/wp-admin/, { waitUntil: 'domcontentloaded', timeout: 30_000 }),
+			page.getByRole('button', { name: /Log In/i }).click(),
+		]);
+	}
 }
 
 async function openImporter(page) {
@@ -26,9 +30,9 @@ async function createCsvDraft(page, suffix) {
 		mimeType: 'text/csv',
 		buffer: Buffer.from(`sku,name,price\nE2E-${suffix},Browser product ${suffix},19.90\n`),
 	});
-	await expect(page.getByText(/was stored securely/i)).toBeVisible();
+	await expect(page.locator('#tds-importer-admin').getByText(/was stored securely/i)).toBeVisible();
 	await page.getByRole('button', { name: /Test connection/i }).click();
-	await expect(page.getByText(/Source tested successfully/i)).toBeVisible();
+	await expect(page.locator('#tds-importer-admin').getByText(/Source tested successfully/i)).toBeVisible();
 }
 
 async function mappingTargetCount(page, target) {
@@ -88,9 +92,9 @@ test('CSV wizard resumes after reload, confirms suggestions, and reaches live pr
 	await expect(page.getByRole('heading', { name: 'Structure' })).toBeFocused();
 	await page.getByRole('button', { name: 'Continue' }).click();
 	await expect(page.getByRole('heading', { name: 'Mapping' })).toBeFocused();
-	await expect(page.getByText(/Nothing has been applied yet/i)).toBeVisible();
+	await expect(page.locator('#tds-importer-admin').getByText(/Nothing has been applied yet/i)).toBeVisible();
 	await page.getByRole('button', { name: /Apply suggestions/i }).click();
-	await expect(page.getByText(/Suggestions reviewed/i)).toBeVisible();
+	await expect(page.locator('#tds-importer-admin').getByText(/Suggestions reviewed/i)).toBeVisible();
 	await expect.poll(() => mappingTargetCount(page, 'name')).toBe(1);
 	await expectNoSeriousA11yViolations(page);
 
@@ -104,7 +108,7 @@ test('CSV wizard resumes after reload, confirms suggestions, and reaches live pr
 	await page.getByLabel('Missing products').selectOption('trash');
 	await page.getByRole('button', { name: 'Continue' }).click();
 	await expect(page.getByRole('heading', { name: 'Review' })).toBeFocused();
-	await expect(page.getByText(/Preflight successful/i)).toBeVisible({ timeout: 60_000 });
+	await expect(page.locator('#tds-importer-admin').getByText(/Preflight successful/i)).toBeVisible({ timeout: 60_000 });
 	const startImport = page.getByRole('button', { name: /Start import/i });
 	await expect(startImport).toBeDisabled();
 	await page.getByLabel(/I confirm that missing products/i).check();
@@ -113,7 +117,7 @@ test('CSV wizard resumes after reload, confirms suggestions, and reaches live pr
 	await startImport.click();
 	await expect(page.getByRole('heading', { name: 'Progress' })).toBeFocused();
 	await expect(page.getByRole('progressbar')).toBeVisible();
-	await expect(page.getByText(/Records \/ minute/i)).toBeVisible();
+	await expect(page.locator('#tds-importer-admin').getByText(/Records \/ minute/i)).toBeVisible();
 	await expectNoSeriousA11yViolations(page);
 
 	await page.reload();
@@ -124,15 +128,19 @@ test('CSV wizard resumes after reload, confirms suggestions, and reaches live pr
 test('stale draft revisions surface a recoverable autosave conflict', async ({ page }) => {
 	await openImporter(page);
 	await page.getByRole('button', { name: /New import/i }).click();
+	await expect(page).toHaveURL(/[?&]draft=\d+/);
 	await page.evaluate(async () => {
 		const id = Number(new URL(window.location.href).searchParams.get('draft'));
 		const drafts = await window.wp.apiFetch({ path: '/tds-import/v1/wizard/drafts' });
 		const draft = drafts.find((row) => row.id === id);
+		if (!draft) {
+			throw new Error(`Draft ${id} was not returned by the API.`);
+		}
 		const payload = { name: draft.name, config: draft.config, revision: draft.revision, wizard_step: 1 };
 		await window.wp.apiFetch({ path: `/tds-import/v1/wizard/drafts/${id}`, method: 'PATCH', data: payload });
 	});
 	await page.getByLabel(/Import name/i).fill('Conflicting local name');
-	await expect(page.getByText(/changed in another window/i)).toBeVisible({ timeout: 15_000 });
+	await expect(page.locator('#tds-importer-admin').getByText(/changed in another window/i)).toBeVisible({ timeout: 15_000 });
 	const reloadServer = page.getByRole('button', { name: /Reload server version/i });
 	await expect(reloadServer).toBeFocused();
 	await reloadServer.click();
