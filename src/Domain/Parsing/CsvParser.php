@@ -31,7 +31,9 @@ final class CsvParser implements Parser {
 		$encoding  = (string) ( $csv['encoding'] ?? 'auto' );
 
 		$file = new SplFileObject( $path, 'rb' );
-		$file->setFlags( SplFileObject::READ_CSV | SplFileObject::DROP_NEW_LINE | SplFileObject::SKIP_EMPTY );
+		// READ_CSV already consumes record separators and preserves quoted line breaks.
+		// DROP_NEW_LINE removed embedded newlines on PHP 8.1 before CSV parsing.
+		$file->setFlags( SplFileObject::READ_CSV | SplFileObject::SKIP_EMPTY );
 		$file->setCsvControl( $delimiter, $enclosure, '\\' );
 
 		$headers = null;

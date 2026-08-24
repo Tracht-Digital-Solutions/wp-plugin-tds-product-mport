@@ -4,8 +4,8 @@
   "phpVersion": "8.1",
   "testsEnvironment": false,
   "plugins": [
-    ".",
-    "https://downloads.wordpress.org/plugin/woocommerce.8.2.0.zip"
+    "https://downloads.wordpress.org/plugin/woocommerce.8.2.0.zip",
+    "."
   ],
   "config": {
     "WP_DEBUG": true,

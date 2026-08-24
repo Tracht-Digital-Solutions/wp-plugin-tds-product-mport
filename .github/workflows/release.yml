@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to publish
+        required: true
+        default: 'v2.0.0'
 
 permissions:
   contents: write
@@ -16,20 +22,24 @@ jobs:
     needs: quality
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.1'
           tools: composer:v2
           coverage: none
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
       - run: composer install --no-dev --classmap-authoritative --no-interaction --prefer-dist
       - name: Verify release version
         shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${RELEASE_TAG#v}"
           grep -Eq "Version:[[:space:]]*${VERSION}" tds-product-importer.php
           grep -Eq "TDS_IMPORTER_VERSION', '${VERSION}'" tds-product-importer.php
           grep -q "Stable tag: ${VERSION}" readme.txt
@@ -44,7 +54,9 @@ jobs:
           sha256sum -c tds-product-importer.zip.sha256
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
           generate_release_notes: true
+          fail_on_unmatched_files: true
           files: |
             dist/tds-product-importer.zip
             dist/tds-product-importer.zip.sha256

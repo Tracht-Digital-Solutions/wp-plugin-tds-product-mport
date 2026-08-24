@@ -37,7 +37,7 @@
     "test": "phpunit",
     "test:integration": "phpunit -c phpunit.integration.xml.dist",
     "lint": "phpcs",
-    "analyse": "phpstan analyse --memory-limit=1G"
+    "analyse": "phpstan analyse --memory-limit=2G"
   },
   "config": {
     "allow-plugins": {

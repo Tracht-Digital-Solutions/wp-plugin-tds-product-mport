@@ -38,10 +38,53 @@ final class SourceManager {
 		if ( ! in_array( $extension, array( 'csv', 'xml' ), true ) ) {
 			throw new InvalidArgumentException( 'Only CSV and XML files are accepted.' );
 		}
-		$destination = $this->new_path( $extension );
-		if ( ! is_uploaded_file( (string) $file['tmp_name'] ) || ! move_uploaded_file( (string) $file['tmp_name'], $destination ) ) {
+
+		$storage = Installer::storage_dir();
+		if ( ! wp_mkdir_p( $storage ) ) {
+			throw new RuntimeException( 'The protected upload directory could not be created.' );
+		}
+
+		require_once ABSPATH . 'wp-admin/includes/file.php';
+
+		$upload              = $file;
+		$upload['name']      = gmdate( 'Ymd-His' ) . '-' . wp_generate_uuid4() . '.' . $extension;
+		$upload_dir_override = static function ( array $directories ) use ( $storage ): array {
+			$directories['path']    = $storage;
+			$directories['basedir'] = $storage;
+			$directories['subdir']  = '';
+			$directories['url']     = '';
+			$directories['baseurl'] = '';
+			$directories['error']   = false;
+			return $directories;
+		};
+
+		add_filter( 'upload_dir', $upload_dir_override );
+		try {
+			$result = wp_handle_upload(
+				$upload,
+				array(
+					'test_form' => false,
+					'mimes'     => array(
+						'csv' => 'text/csv',
+						'xml' => 'text/xml',
+					),
+				)
+			);
+		} finally {
+			remove_filter( 'upload_dir', $upload_dir_override );
+		}
+
+		if ( ! is_array( $result ) || ! empty( $result['error'] ) || empty( $result['file'] ) ) {
 			throw new RuntimeException( 'The uploaded source could not be stored.' );
 		}
+
+		$destination = Installer::resolve_storage_file( (string) $result['file'] );
+		if ( null === $destination ) {
+			wp_delete_file( (string) $result['file'] );
+			throw new RuntimeException( 'The uploaded source was stored outside the protected directory.' );
+		}
+
+		$this->assert_size( $destination );
 		return $destination;
 	}
 

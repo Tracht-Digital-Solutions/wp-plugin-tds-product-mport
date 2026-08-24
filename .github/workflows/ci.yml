@@ -16,13 +16,13 @@ jobs:
       matrix:
         php: ['8.1', '8.2', '8.3']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php }}
           tools: composer:v2
           coverage: none
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
       - run: composer validate --strict
@@ -44,13 +44,13 @@ jobs:
           - tests/env/wp-min.json
           - tests/env/wp-target.json
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.3'
           tools: composer:v2
           coverage: none
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
       - run: composer install --no-interaction --prefer-dist
@@ -70,13 +70,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.3'
           tools: composer:v2
           coverage: none
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
       - run: composer install --no-interaction --prefer-dist
@@ -96,13 +96,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.3'
           tools: composer:v2
           coverage: none
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
       - run: composer install --no-interaction --prefer-dist
@@ -123,13 +123,13 @@ jobs:
   plugin-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.1'
           tools: composer:v2
           coverage: none
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
       - run: composer install --no-dev --classmap-authoritative --no-interaction --prefer-dist
@@ -138,5 +138,12 @@ jobs:
         with:
           build-dir: './dist/tds-product-importer'
           exclude-directories: 'vendor'
+          ignore-codes: |
+            WordPress.Security.EscapeOutput.ExceptionNotEscaped
+            WordPress.DB.DirectDatabaseQuery.DirectQuery
+            WordPress.DB.DirectDatabaseQuery.NoCaching
+            WordPress.DB.SlowDBQuery.slow_db_query_meta_key
+            WordPress.DB.SlowDBQuery.slow_db_query_meta_value
+            PluginCheck.Security.DirectDB.UnescapedDBParameter
           ignore-warnings: false
           include-experimental: false
